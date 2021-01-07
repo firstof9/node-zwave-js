@@ -76,13 +76,13 @@ export class BarrierCCAPI extends PhysicalCCAPI {
 	 * Opens or Closes the barrier
 	 * @param state what status the barrier should be
 	 */
-	public async set(status: number): Promise<void> {
+	public async set(state: BarrierState): Promise<void> {
 		this.assertSupportsCommand(BarrierCommand, BarrierCommand.Set);
 
 		const cc = new BarrierCCSet(this.driver, {
 			nodeId: this.endpoint.nodeId,
 			endpoint: this.endpoint.index,
-			v,
+			state,
 		});
 		await this.driver.sendCommand(cc, this.commandOptions);
 
