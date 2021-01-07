@@ -6,6 +6,7 @@ import {
 	ZWaveError,
 	ZWaveErrorCodes,
 } from "@zwave-js/core";
+import { getEnumMemberName } from "@zwave-js/shared";
 import type { Driver } from "../driver/Driver";
 import log from "../log";
 import { MessagePriority } from "../message/Constants";
@@ -68,12 +69,12 @@ export class BarrierCCAPI extends PhysicalCCAPI {
 			cc,
 			this.commandOptions,
 		))!;
-		return response.status;
+		return response.state;
 	}
 
 	/**
 	 * Opens or Closes the barrier
-	 * @param status what status the barrier should be
+	 * @param state what status the barrier should be
 	 */
 	public async set(status: number): Promise<void> {
 		this.assertSupportsCommand(BarrierCommand, BarrierCommand.Set);
@@ -81,7 +82,7 @@ export class BarrierCCAPI extends PhysicalCCAPI {
 		const cc = new BarrierCCSet(this.driver, {
 			nodeId: this.endpoint.nodeId,
 			endpoint: this.endpoint.index,
-			status,
+			v,
 		});
 		await this.driver.sendCommand(cc, this.commandOptions);
 
@@ -93,6 +94,9 @@ export class BarrierCCAPI extends PhysicalCCAPI {
 		{ property },
 		value,
 	): Promise<void> => {
+		if (property !== "state") {
+			throwUnsupportedProperty(this.ccId, property);
+		}        
 		if (typeof value !== "number") {
 			throwWrongValueType(this.ccId, property, "number", typeof value);
 		}
@@ -123,8 +127,8 @@ export class BarrierCC extends CommandClass {
 			message: "requesting current barrier state...",
 			direction: "outbound",
 		});
-		const status = await api.get();
-		const logMessage = `the barrier is ${status}`;
+        const state = await api.get();
+		const logMessage = `the barrier is ${getEnumMemberName(BarrierState, state)}`;
 		log.controller.logNode(node.id, {
 			message: logMessage,
 			direction: "inbound",
@@ -136,7 +140,7 @@ export class BarrierCC extends CommandClass {
 }
 
 interface BarrierCCSetOptions extends CCCommandOptions {
-	status: number;
+	state: number;
 }
 
 @CCCommand(BarrierCommand.Set)
@@ -153,21 +157,21 @@ export class BarrierCCSet extends BarrierCC {
 				ZWaveErrorCodes.Deserialization_NotImplemented,
 			);
 		} else {
-			this.status = options.status;
+			this.state = options.state;
 		}
 	}
 
-	public status: number;
+	public state: number;
 
 	public serialize(): Buffer {
-		this.payload = Buffer.from([this.status]);
+		this.payload = Buffer.from([this.state]);
 		return super.serialize();
 	}
 
 	public toLogEntry(): MessageOrCCLogEntry {
 		return {
 			...super.toLogEntry(),
-			message: { status: this.status },
+			message: { state: this.state },
 		};
 	}
 }
@@ -180,22 +184,22 @@ export class BarrierCCReport extends BarrierCC {
 	) {
 		super(driver, options);
 		validatePayload(this.payload.length >= 1);
-		this.status = this.payload[0];
+		this.state = this.payload[0];
 		this.persistValues();
 	}
 
 	@ccValue()
 	@ccValueMetadata({
 		...ValueMetadata.Boolean,
-		label: "Status",
-		description: "Status of the barrier",
+		label: "State",
+		description: "State of the barrier",
 	})
-	public readonly status: number;
+	public readonly state: number;
 
 	public toLogEntry(): MessageOrCCLogEntry {
 		return {
 			...super.toLogEntry(),
-			message: { status: this.status },
+			message: { state: this.state },
 		};
 	}
 }
