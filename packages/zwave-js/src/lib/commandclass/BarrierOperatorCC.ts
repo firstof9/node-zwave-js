@@ -39,11 +39,11 @@ export enum BarrierCommand {
 
 // @publicAPI
 export enum BarrierState {
-    Closed = 0,
-    Closing = 252,
-    Stopped = 253,
-	Opening = 254,    
-    Opened = 255,
+    "Closed" = 0x00,
+    "Closing" = 0xfc,
+    "Stopped" = 0xfd,
+	"Opening" = 0xfe,    
+    "Opened" = 0xff,
 }
 
 @API(CommandClasses.Barrier)
