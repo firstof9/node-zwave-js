@@ -39,11 +39,16 @@ export enum BarrierCommand {
 }
 
 // @publicAPI
-export enum BarrierState {
+export enum BarrierStates {
     "Closed" = 0x00,
     "Closing" = 0xfc,
     "Stopped" = 0xfd,
 	"Opening" = 0xfe,    
+    "Opened" = 0xff,
+}
+
+export enum BarrierStateCmd {
+    "Closed" = 0x00,
     "Opened" = 0xff,
 }
 
@@ -76,7 +81,7 @@ export class BarrierCCAPI extends PhysicalCCAPI {
 	 * Opens or Closes the barrier
 	 * @param state what status the barrier should be
 	 */
-	public async set(state: BarrierState): Promise<void> {
+	public async set(state: BarrierStateCmd): Promise<void> {
 		this.assertSupportsCommand(BarrierCommand, BarrierCommand.Set);
 
 		const cc = new BarrierCCSet(this.driver, {
@@ -88,7 +93,7 @@ export class BarrierCCAPI extends PhysicalCCAPI {
 
 		// Refresh the current value
 		await this.get();
-	}
+    }
 
 	protected [SET_VALUE]: SetValueImplementation = async (
 		{ property },
@@ -96,12 +101,12 @@ export class BarrierCCAPI extends PhysicalCCAPI {
 	): Promise<void> => {
 		if (property !== "state") {
 			throwUnsupportedProperty(this.ccId, property);
-		}        
+		}
 		if (typeof value !== "number") {
 			throwWrongValueType(this.ccId, property, "number", typeof value);
 		}
 		await this.set(value);
-	};
+	};    
 }
 
 @commandClass(CommandClasses["Barrier Operator"])
@@ -128,7 +133,7 @@ export class BarrierCC extends CommandClass {
 			direction: "outbound",
 		});
         const state = await api.get();
-		const logMessage = `the barrier is ${getEnumMemberName(BarrierState, state)}`;
+		const logMessage = `the barrier is ${getEnumMemberName(BarrierStates, state)}`;
 		log.controller.logNode(node.id, {
 			message: logMessage,
 			direction: "inbound",
