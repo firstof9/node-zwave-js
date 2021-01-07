@@ -253,6 +253,7 @@ export interface CCAPIs {
 	"Alarm Sensor": import("./AlarmSensorCC").AlarmSensorCCAPI;
 	Association: import("./AssociationCC").AssociationCCAPI;
 	"Association Group Information": import("./AssociationGroupInfoCC").AssociationGroupInfoCCAPI;
+	"Barrier Operator": import("./BarrierOperatorCC").BarrierCCAPI;
 	Basic: import("./BasicCC").BasicCCAPI;
 	Battery: import("./BatteryCC").BatteryCCAPI;
 	"Binary Sensor": import("./BinarySensorCC").BinarySensorCCAPI;
