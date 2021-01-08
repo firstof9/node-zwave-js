@@ -38,17 +38,14 @@ export enum BarrierCommand {
 	Report = 0x03,
 }
 
-// @publicAPI
+/**
+ * @publicAPI
+ */
 export enum BarrierStates {
     "Closed" = 0x00,
     "Closing" = 0xfc,
     "Stopped" = 0xfd,
 	"Opening" = 0xfe,    
-    "Opened" = 0xff,
-}
-
-export enum BarrierStateCmd {
-    "Closed" = 0x00,
     "Opened" = 0xff,
 }
 
@@ -81,7 +78,7 @@ export class BarrierCCAPI extends PhysicalCCAPI {
 	 * Opens or Closes the barrier
 	 * @param state what status the barrier should be
 	 */
-	public async set(state: BarrierStateCmd): Promise<void> {
+	public async set(state: BarrierStates): Promise<void> {
 		this.assertSupportsCommand(BarrierCommand, BarrierCommand.Set);
 
 		const cc = new BarrierCCSet(this.driver, {
