@@ -1,5 +1,7 @@
 import type { LogConfig } from "@zwave-js/core";
-import type { FileSystem } from "./FileSystem";
+import type { FileSystem } from "@zwave-js/host";
+import type { ZWaveSerialPortBase } from "@zwave-js/serial";
+import type { SerialPort } from "serialport";
 
 export interface ZWaveOptions {
 	/** Specify timeouts in milliseconds */
@@ -69,12 +71,6 @@ export interface ZWaveOptions {
 	logConfig?: LogConfig;
 
 	interview: {
-		/**
-		 * @internal
-		 * Set this to true to skip the controller interview. Useful for testing purposes
-		 */
-		skipInterview?: boolean;
-
 		/**
 		 * Whether all user code should be queried during the interview of the UserCode CC.
 		 * Note that enabling this can cause a lot of traffic during the interview.
@@ -191,5 +187,30 @@ export interface ZWaveOptions {
 		 * ```
 		 */
 		scales: Partial<Record<string | number, string | number>>;
+	};
+
+	/** @internal Used for testing internally */
+	testingHooks?: {
+		serialPortBinding?: typeof SerialPort;
+		/**
+		 * A hook that allows accessing the serial port instance after opening
+		 * and before interacting with it.
+		 */
+		onSerialPortOpen?: (port: ZWaveSerialPortBase) => Promise<void>;
+
+		/**
+		 * Set this to true to skip the controller identification sequence.
+		 */
+		skipControllerIdentification?: boolean;
+
+		/**
+		 * Set this to true to skip the interview of all nodes.
+		 */
+		skipNodeInterview?: boolean;
+
+		/**
+		 * Set this to false to skip loading the configuration files. Default: `true`..
+		 */
+		loadConfiguration?: boolean;
 	};
 }

@@ -39,8 +39,11 @@ import {
 	ZWaveError,
 	ZWaveErrorCodes,
 } from "@zwave-js/core";
+import type { ZWaveNodeBase } from "@zwave-js/host";
+import type { Message } from "@zwave-js/serial";
+import { MessagePriority } from "@zwave-js/serial";
 import {
-	discreteBinarySearch,
+	discreteLinearSearch,
 	formatId,
 	getEnumMemberName,
 	getErrorMessage,
@@ -56,8 +59,7 @@ import { padStart } from "alcalzone-shared/strings";
 import { isArray, isObject } from "alcalzone-shared/typeguards";
 import { randomBytes } from "crypto";
 import { EventEmitter } from "events";
-import type { Message } from "../..";
-import { PowerlevelCCTestNodeReport } from "../commandclass";
+import { isDeepStrictEqual } from "util";
 import type {
 	CCAPI,
 	PollValueImplementation,
@@ -73,25 +75,18 @@ import {
 } from "../commandclass/BasicCC";
 import {
 	CentralSceneCCNotification,
-	CentralSceneKeys,
 	getSceneValueId,
 	getSlowRefreshValueId,
 } from "../commandclass/CentralSceneCC";
 import { ClockCCReport } from "../commandclass/ClockCC";
 import { CommandClass, getCCValueMetadata } from "../commandclass/CommandClass";
-import {
-	DoorLockMode,
-	getCurrentModeValueId as getCurrentLockModeValueId,
-} from "../commandclass/DoorLockCC";
+import { getCurrentModeValueId as getCurrentLockModeValueId } from "../commandclass/DoorLockCC";
 import { EntryControlCCNotification } from "../commandclass/EntryControlCC";
 import {
-	FirmwareUpdateCapabilities,
 	FirmwareUpdateMetaDataCC,
 	FirmwareUpdateMetaDataCCGet,
 	FirmwareUpdateMetaDataCCReport,
 	FirmwareUpdateMetaDataCCStatusReport,
-	FirmwareUpdateRequestStatus,
-	FirmwareUpdateStatus,
 } from "../commandclass/FirmwareUpdateMetaDataCC";
 import { HailCC } from "../commandclass/HailCC";
 import { isCommandClassContainer } from "../commandclass/ICommandClassContainer";
@@ -104,7 +99,6 @@ import {
 import {
 	getEndpointCCsValueId,
 	getEndpointDeviceClassValueId,
-	getEndpointIndizesValueId,
 } from "../commandclass/MultiChannelCC";
 import {
 	getCompatEventValueId as getMultilevelSwitchCCCompatEventValueId,
@@ -112,7 +106,6 @@ import {
 	MultilevelSwitchCCSet,
 	MultilevelSwitchCCStartLevelChange,
 	MultilevelSwitchCCStopLevelChange,
-	MultilevelSwitchCommand,
 } from "../commandclass/MultilevelSwitchCC";
 import {
 	getNodeLocationValueId,
@@ -124,7 +117,7 @@ import {
 	NotificationCC,
 	NotificationCCReport,
 } from "../commandclass/NotificationCC";
-import { Powerlevel, PowerlevelTestStatus } from "../commandclass/PowerlevelCC";
+import { PowerlevelCCTestNodeReport } from "../commandclass/PowerlevelCC";
 import { SceneActivationCCSet } from "../commandclass/SceneActivationCC";
 import {
 	Security2CCNonceGet,
@@ -147,30 +140,39 @@ import {
 	getNodeTypeValueId,
 	getRoleTypeValueId,
 	getZWavePlusVersionValueId,
-	ZWavePlusNodeType,
-	ZWavePlusRoleType,
+	ZWavePlusCCGet,
 } from "../commandclass/ZWavePlusCC";
 import {
-	ApplicationUpdateRequest,
-	ApplicationUpdateRequestNodeInfoReceived,
-	ApplicationUpdateRequestNodeInfoRequestFailed,
-} from "../controller/ApplicationUpdateRequest";
-import {
-	GetNodeProtocolInfoRequest,
-	GetNodeProtocolInfoResponse,
-} from "../controller/GetNodeProtocolInfoMessages";
-import {
-	isRssiError,
-	RSSI,
-	RssiError,
-	TXReport,
-} from "../controller/SendDataShared";
+	CentralSceneKeys,
+	DoorLockMode,
+	FirmwareUpdateCapabilities,
+	FirmwareUpdateRequestStatus,
+	FirmwareUpdateStatus,
+	MultilevelSwitchCommand,
+	Powerlevel,
+	PowerlevelTestStatus,
+	ZWavePlusNodeType,
+	ZWavePlusRoleType,
+} from "../commandclass/_Types";
+import { isRssiError, RSSI, RssiError, TXReport } from "../controller/_Types";
 import type { Driver, SendCommandOptions } from "../driver/Driver";
 import { cacheKeys } from "../driver/NetworkCache";
 import { Extended, interpretEx } from "../driver/StateMachineShared";
 import type { StatisticsEventCallbacksWithSelf } from "../driver/Statistics";
 import type { Transaction } from "../driver/Transaction";
-import { MessagePriority } from "../message/Constants";
+import {
+	ApplicationUpdateRequest,
+	ApplicationUpdateRequestNodeInfoReceived,
+	ApplicationUpdateRequestNodeInfoRequestFailed,
+} from "../serialapi/application/ApplicationUpdateRequest";
+import {
+	GetNodeProtocolInfoRequest,
+	type GetNodeProtocolInfoResponse,
+} from "../serialapi/network-mgmt/GetNodeProtocolInfoMessages";
+import {
+	RequestNodeInfoRequest,
+	RequestNodeInfoResponse,
+} from "../serialapi/network-mgmt/RequestNodeInfoMessages";
 import { DeviceClass } from "./DeviceClass";
 import { Endpoint } from "./Endpoint";
 import {
@@ -193,10 +195,7 @@ import {
 	NodeStatusInterpreter,
 	nodeStatusMachineStateToNodeStatus,
 } from "./NodeStatusMachine";
-import {
-	RequestNodeInfoRequest,
-	RequestNodeInfoResponse,
-} from "./RequestNodeInfoMessages";
+import * as nodeUtils from "./utils";
 import type {
 	LifelineHealthCheckResult,
 	LifelineHealthCheckSummary,
@@ -206,8 +205,23 @@ import type {
 	TranslatedValueID,
 	ZWaveNodeEventCallbacks,
 	ZWaveNodeValueEventCallbacks,
-} from "./Types";
-import { InterviewStage, NodeStatus } from "./Types";
+} from "./_Types";
+import { InterviewStage, NodeStatus } from "./_Types";
+
+interface ScheduledPoll {
+	timeout: NodeJS.Timeout;
+	expectedValue?: unknown;
+}
+
+export interface NodeSchedulePollOptions {
+	/** The timeout after which the poll is to be scheduled */
+	timeoutMs?: number;
+	/**
+	 * The expected value that's should be verified with this poll.
+	 * When this value is received in the meantime, the poll will be cancelled.
+	 */
+	expectedValue?: unknown;
+}
 
 export interface ZWaveNode
 	extends TypedEventEmitter<
@@ -221,7 +235,10 @@ export interface ZWaveNode
  * of its root endpoint (index 0)
  */
 @Mixin([EventEmitter, NodeStatisticsHost])
-export class ZWaveNode extends Endpoint implements SecurityClassOwner {
+export class ZWaveNode
+	extends Endpoint
+	implements SecurityClassOwner, ZWaveNodeBase
+{
 	public constructor(
 		public readonly id: number,
 		driver: Driver,
@@ -253,10 +270,15 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 					// Value updates caused by the driver should never cancel a scheduled poll
 					if ("source" in args && args.source === "driver") return;
 
-					if (this.cancelScheduledPoll(args)) {
+					if (
+						this.cancelScheduledPoll(
+							args,
+							(args as ValueUpdatedArgs).newValue,
+						)
+					) {
 						this.driver.controllerLog.logNode(
 							this.nodeId,
-							"Scheduled poll canceled because value was updated",
+							"Scheduled poll canceled because expected value was received",
 							"verbose",
 						);
 					}
@@ -318,48 +340,13 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 			if (timeout) clearTimeout(timeout);
 		}
 
+		// Remove all event handlers
+		this.removeAllListeners();
+
 		// Clear all scheduled polls that would interfere with the interview
 		for (const valueId of this.scheduledPolls.keys()) {
 			this.cancelScheduledPoll(valueId);
 		}
-	}
-
-	/**
-	 * Enhances a value id so it can be consumed better by applications
-	 */
-	private translateValueID<T extends ValueID>(
-		valueId: T,
-	): T & TranslatedValueID {
-		// Try to retrieve the speaking CC name
-		const commandClassName = getCCName(valueId.commandClass);
-		const ret: T & TranslatedValueID = {
-			commandClassName,
-			...valueId,
-		};
-		const ccInstance = this.createCCInstanceInternal(valueId.commandClass);
-		if (!ccInstance) {
-			throw new ZWaveError(
-				`Cannot translate a value ID for the non-implemented CC ${getCCName(
-					valueId.commandClass,
-				)}`,
-				ZWaveErrorCodes.CC_NotImplemented,
-			);
-		}
-
-		// Retrieve the speaking property name
-		ret.propertyName = ccInstance.translateProperty(
-			valueId.property,
-			valueId.propertyKey,
-		);
-		// Try to retrieve the speaking property key
-		if (valueId.propertyKey != undefined) {
-			const propertyKey = ccInstance.translatePropertyKey(
-				valueId.property,
-				valueId.propertyKey,
-			);
-			ret.propertyKeyName = propertyKey;
-		}
-		return ret;
 	}
 
 	/**
@@ -370,7 +357,7 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 		arg: T,
 	): void {
 		// Try to retrieve the speaking CC name
-		const outArg = this.translateValueID(arg);
+		const outArg = nodeUtils.translateValueID(this.driver, this, arg);
 		// @ts-expect-error This can happen for value updated events
 		if ("source" in outArg) delete outArg.source;
 
@@ -380,10 +367,20 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 				this.getValueMetadata(arg);
 		}
 
-		const ccInstance = this.createCCInstanceInternal(arg.commandClass);
-		const isInternalValue =
-			ccInstance && ccInstance.isInternalValue(arg.property as any);
-		if ((arg as any as ValueUpdatedArgs).source !== "driver") {
+		const ccInstance = CommandClass.createInstanceUnchecked(
+			this.driver,
+			this,
+			arg.commandClass,
+		);
+		const isInternalValue = ccInstance?.isInternalValue(
+			arg.property as any,
+		);
+		// Check whether this value change may be logged
+		const isSecretValue = !!ccInstance?.isSecretValue(arg.property as any);
+		if (
+			!isSecretValue &&
+			(arg as any as ValueUpdatedArgs).source !== "driver"
+		) {
 			// Log the value change, except for updates caused by the driver itself
 			// I don't like the splitting and any but its the easiest solution here
 			const [changeTarget, changeType] = eventName.split(" ");
@@ -411,7 +408,7 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 			// Only application CCs need to be filtered
 			applicationCCs.includes(arg.commandClass) &&
 			// and only if the endpoints are not unnecessary and the root values mirror them
-			this.shouldHideRootApplicationCCValues()
+			nodeUtils.shouldHideRootApplicationCCValues(this.driver, this)
 		) {
 			// Iterate through all possible non-root endpoints of this node and
 			// check if there is a value ID that mirrors root endpoint functionality
@@ -612,6 +609,13 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 		return this.securityClasses.get(securityClass) ?? unknownBoolean;
 	}
 
+	public setSecurityClass(
+		securityClass: SecurityClass,
+		granted: boolean,
+	): void {
+		this.securityClasses.set(securityClass, granted);
+	}
+
 	/** Returns the highest security class this node was granted or `undefined` if that information isn't known yet */
 	public getHighestSecurityClass(): SecurityClass | undefined {
 		if (this.securityClasses.size === 0) return undefined;
@@ -675,7 +679,18 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 
 	public get firmwareVersion(): string | undefined {
 		// We're only interested in the first (main) firmware
-		return this.getValue<string[]>(getFirmwareVersionsValueId())?.[0];
+		const ret = this.getValue<string[]>(getFirmwareVersionsValueId())?.[0];
+
+		// Special case for the official 700 series firmwares which are aligned with the SDK version
+		// We want to work with the full x.y.z firmware version here.
+		if (ret && this.isControllerNode) {
+			const sdkVersion = this.sdkVersion;
+			if (sdkVersion && sdkVersion.startsWith(`${ret}.`)) {
+				return sdkVersion;
+			}
+		}
+		// For all others, just return the simple x.y firmware version
+		return ret;
 	}
 
 	public get sdkVersion(): string | undefined {
@@ -813,93 +828,7 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 
 	/** Returns a list of all value names that are defined on all endpoints of this node */
 	public getDefinedValueIDs(): TranslatedValueID[] {
-		let ret: ValueID[] = [];
-		const allowControlled: CommandClasses[] = [
-			CommandClasses["Scene Activation"],
-		];
-		for (const endpoint of this.getAllEndpoints()) {
-			for (const [cc, info] of endpoint.implementedCommandClasses) {
-				// Only expose value IDs for CCs that are supported
-				// with some exceptions that are controlled
-				if (
-					info.isSupported ||
-					(info.isControlled && allowControlled.includes(cc))
-				) {
-					const ccInstance = endpoint.createCCInstanceUnsafe(cc);
-					if (ccInstance) {
-						ret.push(...ccInstance.getDefinedValueIDs());
-					}
-				}
-			}
-		}
-
-		// Application command classes of the Root Device capabilities that are also advertised by at
-		// least one End Point SHOULD be filtered out by controlling nodes before presenting the functionalities
-		// via service discovery mechanisms like mDNS or to users in a GUI.
-
-		// We do this when there are endpoints that were explicitly preserved
-		if (this.shouldHideRootApplicationCCValues()) {
-			ret = this.filterRootApplicationCCValueIDs(ret);
-		}
-
-		// Translate the remaining value IDs before exposing them to applications
-		return ret.map((id) => this.translateValueID(id));
-	}
-
-	/** Determines whether the root application CC values should be hidden in favor of endpoint values */
-	private shouldHideRootApplicationCCValues(): boolean {
-		// This is not the case when the root values should explicitly be preserved
-		if (this._deviceConfig?.compat?.preserveRootApplicationCCValueIDs)
-			return false;
-
-		// This is not the case when there are no endpoints
-		const endpointIndizes = this.getEndpointIndizes();
-		if (endpointIndizes.length === 0) return false;
-
-		// This is not the case when only individual endpoints should be preserved in addition to the root
-		const preserveEndpoints = this._deviceConfig?.compat?.preserveEndpoints;
-		if (
-			preserveEndpoints != undefined &&
-			preserveEndpoints !== "*" &&
-			preserveEndpoints.length !== endpointIndizes.length
-		) {
-			return false;
-		}
-
-		// Otherwise they should be hidden
-		return true;
-	}
-
-	private shouldHideRootValueID(
-		valueId: ValueID,
-		allValueIds: ValueID[],
-	): boolean {
-		// Non-root endpoint values don't need to be filtered
-		if (!!valueId.endpoint) return false;
-		// Non-application CCs don't need to be filtered
-		if (!applicationCCs.includes(valueId.commandClass)) return false;
-		// Filter out root values if an identical value ID exists for another endpoint
-		const valueExistsOnAnotherEndpoint = allValueIds.some(
-			(other) =>
-				// same CC
-				other.commandClass === valueId.commandClass &&
-				// non-root endpoint
-				!!other.endpoint &&
-				// same property and key
-				other.property === valueId.property &&
-				other.propertyKey === valueId.propertyKey,
-		);
-		return valueExistsOnAnotherEndpoint;
-	}
-
-	/**
-	 * Removes all Value IDs from an array that belong to a root endpoint and have a corresponding
-	 * Value ID on a non-root endpoint
-	 */
-	private filterRootApplicationCCValueIDs(allValueIds: ValueID[]): ValueID[] {
-		return allValueIds.filter(
-			(vid) => !this.shouldHideRootValueID(vid, allValueIds),
-		);
+		return nodeUtils.getDefinedValueIDs(this.driver, this);
 	}
 
 	/**
@@ -1017,7 +946,7 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 	 * @internal
 	 * All polls that are currently scheduled for this node
 	 */
-	public scheduledPolls = new ObjectKeyMap<ValueID, NodeJS.Timeout>();
+	public scheduledPolls = new ObjectKeyMap<ValueID, ScheduledPoll>();
 
 	/**
 	 * @internal
@@ -1026,8 +955,13 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 	 */
 	public schedulePoll(
 		valueId: ValueID,
-		timeoutMs: number = this.driver.options.timeouts.refreshValue,
+		options: NodeSchedulePollOptions = {},
 	): boolean {
+		const {
+			timeoutMs = this.driver.options.timeouts.refreshValue,
+			expectedValue,
+		} = options;
+
 		// Avoid false positives or false negatives due to a mis-formatted value ID
 		valueId = normalizeValueID(valueId);
 
@@ -1051,62 +985,65 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 
 		// make sure there is only one timeout instance per poll
 		this.cancelScheduledPoll(valueId);
-		this.scheduledPolls.set(
-			valueId,
-			setTimeout(async () => {
-				this.cancelScheduledPoll(valueId);
-				try {
-					await api.pollValue!(valueId);
-				} catch {
-					/* ignore */
-				}
-			}, timeoutMs).unref(),
-		);
+		const timeout = setTimeout(async () => {
+			// clean up after the timeout
+			this.cancelScheduledPoll(valueId);
+			try {
+				await api.pollValue!(valueId);
+			} catch {
+				/* ignore */
+			}
+		}, timeoutMs).unref();
+		this.scheduledPolls.set(valueId, { timeout, expectedValue });
+
 		return true;
 	}
 
 	/**
 	 * @internal
-	 * Cancels a poll that has been scheduled with schedulePoll
+	 * Cancels a poll that has been scheduled with schedulePoll.
+	 *
+	 * @param actualValue If given, this indicates the value that was received by a node, which triggered the poll to be canceled.
+	 * If the scheduled poll expects a certain value and this matches the expected value for the scheduled poll, the poll will be canceled.
 	 */
-	public cancelScheduledPoll(valueId: ValueID): boolean {
+	public cancelScheduledPoll(
+		valueId: ValueID,
+		actualValue?: unknown,
+	): boolean {
 		// Avoid false positives or false negatives due to a mis-formatted value ID
 		valueId = normalizeValueID(valueId);
 
-		if (this.scheduledPolls.has(valueId)) {
-			clearTimeout(this.scheduledPolls.get(valueId)!);
-			this.scheduledPolls.delete(valueId);
-			return true;
+		const poll = this.scheduledPolls.get(valueId);
+		if (!poll) return false;
+
+		if (
+			actualValue != undefined &&
+			poll.expectedValue != undefined &&
+			!isDeepStrictEqual(poll.expectedValue, actualValue)
+		) {
+			return false;
 		}
-		return false;
+
+		clearTimeout(poll.timeout);
+		this.scheduledPolls.delete(valueId);
+
+		return true;
 	}
 
 	public get endpointCountIsDynamic(): boolean | undefined {
-		return this.getValue({
-			commandClass: CommandClasses["Multi Channel"],
-			property: "countIsDynamic",
-		});
+		return nodeUtils.endpointCountIsDynamic(this.driver, this);
 	}
 
 	public get endpointsHaveIdenticalCapabilities(): boolean | undefined {
-		return this.getValue({
-			commandClass: CommandClasses["Multi Channel"],
-			property: "identicalCapabilities",
-		});
+		return nodeUtils.endpointsHaveIdenticalCapabilities(this.driver, this);
 	}
 
 	public get individualEndpointCount(): number | undefined {
-		return this.getValue({
-			commandClass: CommandClasses["Multi Channel"],
-			property: "individualCount",
-		});
+		return nodeUtils.getIndividualEndpointCount(this.driver, this);
 	}
 
 	public get aggregatedEndpointCount(): number | undefined {
-		return this.getValue({
-			commandClass: CommandClasses["Multi Channel"],
-			property: "aggregatedCount",
-		});
+		return nodeUtils.getAggregatedEndpointCount(this.driver, this);
 	}
 
 	/** Returns the device class of an endpoint. Falls back to the node's device class if the information is not known. */
@@ -1153,34 +1090,19 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 	 * Some devices are known to contradict themselves.
 	 */
 	public getEndpointCount(): number {
-		return (
-			(this.individualEndpointCount || 0) +
-			(this.aggregatedEndpointCount || 0)
-		);
+		return nodeUtils.getEndpointCount(this.driver, this);
 	}
 
 	/**
 	 * Returns indizes of all endpoints on the node.
 	 */
 	public getEndpointIndizes(): number[] {
-		let ret = this.getValue<number[]>(getEndpointIndizesValueId());
-		if (!ret) {
-			// Endpoint indizes not stored, assume sequential endpoints
-			ret = [];
-			for (let i = 1; i <= this.getEndpointCount(); i++) {
-				ret.push(i);
-			}
-		}
-		return ret;
+		return nodeUtils.getEndpointIndizes(this.driver, this);
 	}
 
 	/** Whether the Multi Channel CC has been interviewed and all endpoint information is known */
 	private get isMultiChannelInterviewComplete(): boolean {
-		return !!this.getValue({
-			commandClass: CommandClasses["Multi Channel"],
-			endpoint: 0,
-			property: "interviewComplete",
-		});
+		return nodeUtils.isMultiChannelInterviewComplete(this.driver, this);
 	}
 
 	/** Cache for this node's endpoint instances */
@@ -1239,16 +1161,7 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 
 	/** Returns a list of all endpoints of this node, including the root endpoint (index 0) */
 	public getAllEndpoints(): Endpoint[] {
-		const ret: Endpoint[] = [this];
-		// Check if the Multi Channel CC interview for this node is completed,
-		// because we don't have all the endpoint information before that
-		if (this.isMultiChannelInterviewComplete) {
-			for (const i of this.getEndpointIndizes()) {
-				const endpoint = this.getEndpoint(i);
-				if (endpoint) ret.push(endpoint);
-			}
-		}
-		return ret;
+		return nodeUtils.getAllEndpoints(this.driver, this) as Endpoint[];
 	}
 
 	/**
@@ -1474,7 +1387,13 @@ export class ZWaveNode extends Endpoint implements SecurityClassOwner {
 		this.supportsSecurity = resp.supportsSecurity;
 		this.supportsBeaming = resp.supportsBeaming;
 
-		this.applyDeviceClass(resp.deviceClass);
+		const deviceClass = new DeviceClass(
+			this.driver.configManager,
+			resp.basicDeviceClass,
+			resp.genericDeviceClass,
+			resp.specificDeviceClass,
+		);
+		this.applyDeviceClass(deviceClass);
 
 		const logMessage = `received response for protocol info:
 basic device class:    ${this.deviceClass!.basic.label}
@@ -1691,7 +1610,7 @@ protocol version:      ${this.protocolVersion}`;
 			if (instance.interviewComplete) return "continue";
 
 			try {
-				await instance.interview();
+				await instance.interview(this.driver);
 			} catch (e) {
 				if (isTransmissionError(e)) {
 					// We had a CAN or timeout during the interview
@@ -2094,7 +2013,7 @@ protocol version:      ${this.protocolVersion}`;
 			const instance = endpoint.createCCInstanceUnsafe(cc);
 			if (instance) {
 				try {
-					await instance.interview();
+					await instance.interview(this.driver);
 				} catch (e) {
 					this.driver.controllerLog.logNode(
 						this.id,
@@ -2117,7 +2036,7 @@ protocol version:      ${this.protocolVersion}`;
 			const instance = endpoint.createCCInstanceUnsafe(cc);
 			if (instance) {
 				try {
-					await instance.refreshValues();
+					await instance.refreshValues(this.driver);
 				} catch (e) {
 					this.driver.controllerLog.logNode(
 						this.id,
@@ -2146,7 +2065,7 @@ protocol version:      ${this.protocolVersion}`;
 					continue;
 				}
 				try {
-					await cc.refreshValues();
+					await cc.refreshValues(this.driver);
 				} catch (e) {
 					this.driver.controllerLog.logNode(
 						this.id,
@@ -2310,6 +2229,8 @@ protocol version:      ${this.protocolVersion}`;
 			return this.handleEntryControlNotification(command);
 		} else if (command instanceof PowerlevelCCTestNodeReport) {
 			return this.handlePowerlevelTestNodeReport(command);
+		} else if (command instanceof ZWavePlusCCGet) {
+			return this.handleZWavePlusGet(command);
 		}
 
 		// Ignore all commands that don't need to be handled
@@ -2915,6 +2836,19 @@ protocol version:      ${this.protocolVersion}`;
 		}
 	}
 
+	private async handleZWavePlusGet(_command: ZWavePlusCCGet): Promise<void> {
+		// treat this as a sign that the node is awake
+		this.markAsAwake();
+
+		await this.commandClasses["Z-Wave Plus Info"].sendReport({
+			zwavePlusVersion: 2,
+			roleType: ZWavePlusRoleType.CentralStaticController,
+			nodeType: ZWavePlusNodeType.Node,
+			installerIcon: 0x0500, // Generic Gateway
+			userIcon: 0x0500, // Generic Gateway
+		});
+	}
+
 	/**
 	 * Allows automatically resetting notification values to idle if the node does not do it itself
 	 */
@@ -3177,8 +3111,8 @@ protocol version:      ${this.protocolVersion}`;
 			command.hour !== hours ||
 			command.minute !== minutes
 		) {
-			const endpoint = command.getEndpoint();
-			if (!endpoint || !endpoint.commandClasses.Clock.isSupported()) {
+			const endpoint = command.getEndpoint(this.driver);
+			if (!endpoint /*|| !endpoint.commandClasses.Clock.isSupported()*/) {
 				// Make sure the endpoint supports the CC (GH#1704)
 				return;
 			}
@@ -4068,7 +4002,7 @@ protocol version:      ${this.protocolVersion}`;
 					return failedPingsController === 0;
 				};
 				try {
-					const powerlevel = await discreteBinarySearch(
+					const powerlevel = await discreteLinearSearch(
 						Powerlevel["Normal Power"], // minimum reduction
 						Powerlevel["-9 dBm"], // maximum reduction
 						executor,
@@ -4244,7 +4178,10 @@ ${formatLifelineHealthCheckSummary(summary)}`,
 			// Now instruct this node to ping the other one, figuring out the minimum powerlevel
 			if (this.supportsCC(CommandClasses.Powerlevel)) {
 				try {
-					const powerlevel = await discreteBinarySearch(
+					// We have to start with the maximum powerlevel and work our way down
+					// Otherwise some nodes get stuck trying to complete the check at a bad powerlevel
+					// causing the following measurements to fail.
+					const powerlevel = await discreteLinearSearch(
 						Powerlevel["Normal Power"], // minimum reduction
 						Powerlevel["-9 dBm"], // maximum reduction
 						executor(this, otherNode),
@@ -4277,7 +4214,7 @@ ${formatLifelineHealthCheckSummary(summary)}`,
 				otherNode.supportsCC(CommandClasses.Powerlevel)
 			) {
 				try {
-					const powerlevel = await discreteBinarySearch(
+					const powerlevel = await discreteLinearSearch(
 						Powerlevel["Normal Power"], // minimum reduction
 						Powerlevel["-9 dBm"], // maximum reduction
 						executor(otherNode, this),

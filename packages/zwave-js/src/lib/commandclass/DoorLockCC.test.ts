@@ -1,7 +1,6 @@
 import { CommandClasses, Duration } from "@zwave-js/core";
-import type { Driver } from "../driver/Driver";
-import { ZWaveNode } from "../node/Node";
-import { createEmptyMockDriver } from "../test/mocks";
+import { createTestingHost } from "@zwave-js/host";
+import { TestingHost } from "../test/mocks";
 import {
 	DoorLockCCCapabilitiesGet,
 	DoorLockCCCapabilitiesReport,
@@ -11,13 +10,11 @@ import {
 	DoorLockCCOperationGet,
 	DoorLockCCOperationReport,
 	DoorLockCCOperationSet,
-	DoorLockCommand,
-	DoorLockMode,
-	DoorLockOperationType,
 	getBoltSupportedValueId,
 	getDoorSupportedValueId,
 	getLatchSupportedValueId,
 } from "./DoorLockCC";
+import { DoorLockCommand, DoorLockMode, DoorLockOperationType } from "./_Types";
 
 function buildCCBuffer(payload: Buffer): Buffer {
 	return Buffer.concat([
@@ -29,36 +26,26 @@ function buildCCBuffer(payload: Buffer): Buffer {
 }
 
 describe("lib/commandclass/DoorLockCC => ", () => {
-	let fakeDriver: Driver;
-	let node1: ZWaveNode;
-	let node2: ZWaveNode;
+	let host: TestingHost;
 
 	beforeAll(() => {
-		fakeDriver = createEmptyMockDriver() as unknown as Driver;
-		node1 = new ZWaveNode(1, fakeDriver as any);
-		(fakeDriver.controller.nodes as any).set(node1.id, node1);
+		host = createTestingHost();
 
 		// Node 1 supports all Door Lock sensors
-		node1.valueDB.setValue(getDoorSupportedValueId(0), true);
-		node1.valueDB.setValue(getBoltSupportedValueId(0), true);
-		node1.valueDB.setValue(getLatchSupportedValueId(0), true);
-
-		node2 = new ZWaveNode(2, fakeDriver as any);
-		(fakeDriver.controller.nodes as any).set(node2.id, node2);
+		const valueDB1 = host.getValueDB(1);
+		valueDB1.setValue(getDoorSupportedValueId(0), true);
+		valueDB1.setValue(getBoltSupportedValueId(0), true);
+		valueDB1.setValue(getLatchSupportedValueId(0), true);
 
 		// Node 2 doesn't support the door sensor
-		node2.valueDB.setValue(getDoorSupportedValueId(0), false);
-		node2.valueDB.setValue(getBoltSupportedValueId(0), true);
-		node2.valueDB.setValue(getLatchSupportedValueId(0), true);
-	});
-
-	afterAll(() => {
-		node1.destroy();
-		node2.destroy();
+		const valueDB2 = host.getValueDB(2);
+		valueDB2.setValue(getDoorSupportedValueId(0), false);
+		valueDB2.setValue(getBoltSupportedValueId(0), true);
+		valueDB2.setValue(getLatchSupportedValueId(0), true);
 	});
 
 	it("the OperationGet command should serialize correctly", () => {
-		const cc = new DoorLockCCOperationGet(fakeDriver, { nodeId: 1 });
+		const cc = new DoorLockCCOperationGet(host, { nodeId: 1 });
 		const expected = buildCCBuffer(
 			Buffer.from([
 				DoorLockCommand.OperationGet, // CC Command
@@ -68,7 +55,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 	});
 
 	it("the OperationSet command should serialize correctly", () => {
-		const cc = new DoorLockCCOperationSet(fakeDriver, {
+		const cc = new DoorLockCCOperationSet(host, {
 			nodeId: 2,
 			mode: DoorLockMode.OutsideUnsecured,
 		});
@@ -92,7 +79,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 				20, // timeout seconds
 			]),
 		);
-		const cc = new DoorLockCCOperationReport(fakeDriver, {
+		const cc = new DoorLockCCOperationReport(host, {
 			nodeId: 1,
 			data: ccData,
 		});
@@ -131,7 +118,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 				0x01, // 1 second left
 			]),
 		);
-		const cc = new DoorLockCCOperationReport(fakeDriver, {
+		const cc = new DoorLockCCOperationReport(host, {
 			nodeId: 2,
 			data: ccData,
 		});
@@ -153,7 +140,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 	});
 
 	it("the ConfigurationGet command should serialize correctly", () => {
-		const cc = new DoorLockCCConfigurationGet(fakeDriver, { nodeId: 1 });
+		const cc = new DoorLockCCConfigurationGet(host, { nodeId: 1 });
 		const expected = buildCCBuffer(
 			Buffer.from([
 				DoorLockCommand.ConfigurationGet, // CC Command
@@ -172,7 +159,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 				20, // timeout seconds
 			]),
 		);
-		const cc = new DoorLockCCConfigurationReport(fakeDriver, {
+		const cc = new DoorLockCCConfigurationReport(host, {
 			nodeId: 1,
 			data: ccData,
 		});
@@ -207,7 +194,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 				20, // timeout seconds
 			]),
 		);
-		const cc = new DoorLockCCConfigurationReport(fakeDriver, {
+		const cc = new DoorLockCCConfigurationReport(host, {
 			nodeId: 1,
 			data: ccData,
 		});
@@ -225,7 +212,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 				20, // timeout seconds
 			]),
 		);
-		const cc = new DoorLockCCConfigurationReport(fakeDriver, {
+		const cc = new DoorLockCCConfigurationReport(host, {
 			nodeId: 1,
 			data: ccData,
 		});
@@ -243,7 +230,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 				0xff, // timeout seconds
 			]),
 		);
-		const cc = new DoorLockCCConfigurationReport(fakeDriver, {
+		const cc = new DoorLockCCConfigurationReport(host, {
 			nodeId: 1,
 			data: ccData,
 		});
@@ -267,7 +254,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 				0b01, // flags
 			]),
 		);
-		const cc = new DoorLockCCConfigurationReport(fakeDriver, {
+		const cc = new DoorLockCCConfigurationReport(host, {
 			nodeId: 1,
 			data: ccData,
 		});
@@ -279,7 +266,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 	});
 
 	it("the ConfigurationSet command (v1-3) should serialize correctly (timed)", () => {
-		const cc = new DoorLockCCConfigurationSet(fakeDriver, {
+		const cc = new DoorLockCCConfigurationSet(host, {
 			nodeId: 2,
 			operationType: DoorLockOperationType.Timed,
 			outsideHandlesCanOpenDoorConfiguration: [false, true, true, true],
@@ -299,7 +286,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 	});
 
 	it("the ConfigurationSet command (v1-3) should serialize correctly (constant)", () => {
-		const cc = new DoorLockCCConfigurationSet(fakeDriver, {
+		const cc = new DoorLockCCConfigurationSet(host, {
 			nodeId: 2,
 			operationType: DoorLockOperationType.Constant,
 			outsideHandlesCanOpenDoorConfiguration: [false, true, true, true],
@@ -318,7 +305,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 	});
 
 	it("the ConfigurationSet command (v4) should serialize correctly", () => {
-		const cc = new DoorLockCCConfigurationSet(fakeDriver, {
+		const cc = new DoorLockCCConfigurationSet(host, {
 			nodeId: 2,
 			operationType: DoorLockOperationType.Timed,
 			outsideHandlesCanOpenDoorConfiguration: [false, true, true, true],
@@ -347,7 +334,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 	});
 
 	it("the CapabilitiesGet command should serialize correctly", () => {
-		const cc = new DoorLockCCCapabilitiesGet(fakeDriver, { nodeId: 1 });
+		const cc = new DoorLockCCCapabilitiesGet(host, { nodeId: 1 });
 		const expected = buildCCBuffer(
 			Buffer.from([
 				DoorLockCommand.CapabilitiesGet, // CC Command
@@ -371,7 +358,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 				0b1010, // feature flags
 			]),
 		);
-		const cc = new DoorLockCCCapabilitiesReport(fakeDriver, {
+		const cc = new DoorLockCCCapabilitiesReport(host, {
 			nodeId: 1,
 			data: ccData,
 		});
@@ -405,7 +392,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 	// 			1, // duration
 	// 		]),
 	// 	);
-	// 	const cc = new DoorLockCCReport(fakeDriver, { data: ccData });
+	// 	const cc = new DoorLockCCReport(host, { data: ccData });
 
 	// 	expect(cc.currentValue).toBe(55);
 	// 	expect(cc.targetValue).toBe(66);
@@ -418,7 +405,7 @@ describe("lib/commandclass/DoorLockCC => ", () => {
 	// 		1,
 	// 		Buffer.from([255]), // not a valid command
 	// 	);
-	// 	const cc: any = new DoorLockCC(fakeDriver, {
+	// 	const cc: any = new DoorLockCC(host, {
 	// 		data: serializedCC,
 	// 	});
 	// 	expect(cc.constructor).toBe(DoorLockCC);

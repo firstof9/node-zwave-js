@@ -8,17 +8,13 @@ interface DisconnectError extends Error {
 
 /** The default version of the Z-Wave serial binding that works using node-serialport */
 export class ZWaveSerialPort extends ZWaveSerialPortBase {
-	constructor(port: string, loggers: ZWaveLogContainer);
-	/** @internal */ constructor(
-		port: string,
-		loggers: ZWaveLogContainer,
-		Binding: typeof SerialPort,
-	);
 	constructor(
 		port: string,
 		loggers: ZWaveLogContainer,
 		Binding: typeof SerialPort = SerialPort,
 	) {
+		let removeListeners: (removeOnClose: boolean) => void;
+
 		super(
 			{
 				create: () =>
@@ -32,12 +28,10 @@ export class ZWaveSerialPort extends ZWaveSerialPortBase {
 					}),
 				open: (serial: SerialPort) =>
 					new Promise((resolve, reject) => {
-						// eslint-disable-next-line prefer-const
-						let removeListeners: () => void;
 						const onClose = (err?: DisconnectError) => {
 							// detect serial disconnection errors
 							if (err?.disconnected === true) {
-								removeListeners();
+								removeListeners(true);
 								this.emit(
 									"error",
 									new ZWaveError(
@@ -48,19 +42,20 @@ export class ZWaveSerialPort extends ZWaveSerialPortBase {
 							}
 						};
 						const onError = (err: Error) => {
-							removeListeners();
+							removeListeners(true);
 							reject(err);
 						};
 						const onOpen = () => {
-							removeListeners();
+							removeListeners(false);
 							resolve();
 						};
 
 						// We need to remove the listeners again no matter which of the handlers is called
 						// Otherwise this would cause an EventEmitter leak.
 						// Hence this somewhat ugly construct
-						removeListeners = () => {
-							serial.removeListener("close", onClose);
+						removeListeners = (removeOnClose: boolean) => {
+							if (removeOnClose)
+								serial.removeListener("close", onClose);
 							serial.removeListener("error", onError);
 							serial.removeListener("open", onOpen);
 						};
@@ -71,6 +66,7 @@ export class ZWaveSerialPort extends ZWaveSerialPortBase {
 					}),
 				close: (serial: SerialPort) =>
 					new Promise((resolve) => {
+						removeListeners(true);
 						serial.once("close", resolve).close();
 					}),
 			},

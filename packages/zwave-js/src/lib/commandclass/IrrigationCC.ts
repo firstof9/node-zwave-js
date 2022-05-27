@@ -12,11 +12,12 @@ import {
 	ZWaveError,
 	ZWaveErrorCodes,
 } from "@zwave-js/core";
+import type { ZWaveHost } from "@zwave-js/host";
+import { MessagePriority } from "@zwave-js/serial";
 import { getEnumMemberName, pick } from "@zwave-js/shared";
 import { validateArgs } from "@zwave-js/transformers";
 import { padStart } from "alcalzone-shared/strings";
 import type { Driver } from "../driver/Driver";
-import { MessagePriority } from "../message/Constants";
 import {
 	CCAPI,
 	PollValueImplementation,
@@ -41,43 +42,13 @@ import {
 	gotDeserializationOptions,
 	implementedVersion,
 } from "./CommandClass";
-
-// All the supported commands
-export enum IrrigationCommand {
-	SystemInfoGet = 0x01,
-	SystemInfoReport = 0x02,
-	SystemStatusGet = 0x03,
-	SystemStatusReport = 0x04,
-	SystemConfigSet = 0x05,
-	SystemConfigGet = 0x06,
-	SystemConfigReport = 0x07,
-	ValveInfoGet = 0x08,
-	ValveInfoReport = 0x09,
-	ValveConfigSet = 0x0a,
-	ValveConfigGet = 0x0b,
-	ValveConfigReport = 0x0c,
-	ValveRun = 0x0d,
-	ValveTableSet = 0x0e,
-	ValveTableGet = 0x0f,
-	ValveTableReport = 0x10,
-	ValveTableRun = 0x11,
-	SystemShutoff = 0x12,
-}
-
-// @publicAPI
-export enum IrrigationSensorPolarity {
-	Low = 0,
-	High = 1,
-}
-
-// @publicAPI
-export enum ValveType {
-	ZoneValve = 0,
-	MasterValve = 1,
-}
-
-// @publicAPI
-export type ValveId = "master" | number;
+import {
+	IrrigationCommand,
+	IrrigationSensorPolarity,
+	ValveId,
+	ValveTableEntry,
+	ValveType,
+} from "./_Types";
 
 function testResponseForIrrigationCommandWithValveId(
 	sent: {
@@ -93,12 +64,6 @@ function testResponseForIrrigationCommandWithValveId(
 function valveIdToMetadataPrefix(valveId: ValveId): string {
 	if (valveId === "master") return "Master valve";
 	return `Valve ${padStart(valveId.toString(), 3, "0")}`;
-}
-
-// @publicAPI
-export interface ValveTableEntry {
-	valveId: number;
-	duration: number;
 }
 
 export function getNumValvesValueId(endpointIndex?: number): ValueID {
@@ -655,7 +620,7 @@ export class IrrigationCCAPI extends CCAPI {
 		}
 	}
 
-	@validateArgs()
+	@validateArgs({ strictEnums: true })
 	public async setSystemConfig(
 		config: IrrigationCCSystemConfigSetOptions,
 	): Promise<void> {
@@ -1073,27 +1038,27 @@ export class IrrigationCC extends CommandClass {
 		);
 	}
 
-	public async interview(): Promise<void> {
-		const node = this.getNode()!;
-		const endpoint = this.getEndpoint()!;
+	public async interview(driver: Driver): Promise<void> {
+		const node = this.getNode(driver)!;
+		const endpoint = this.getEndpoint(driver)!;
 		const api = endpoint.commandClasses.Irrigation.withOptions({
 			priority: MessagePriority.NodeQuery,
 		});
 
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: `Interviewing ${this.ccName}...`,
 			direction: "none",
 		});
 
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: "Querying irrigation system info...",
 			direction: "outbound",
 		});
 		const systemInfo = await api.getSystemInfo();
 		if (!systemInfo) {
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message:
 					"Time out while querying irrigation system info, skipping interview...",
@@ -1106,7 +1071,7 @@ supports master valve: ${systemInfo.supportsMasterValve}
 no. of valves:         ${systemInfo.numValves}
 no. of valve tables:   ${systemInfo.numValveTables}
 max. valve table size: ${systemInfo.maxValveTableSize}`;
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: logMessage,
 			direction: "inbound",
@@ -1131,21 +1096,21 @@ max. valve table size: ${systemInfo.maxValveTableSize}`;
 		);
 
 		// Query current values
-		await this.refreshValues();
+		await this.refreshValues(driver);
 
 		// Remember that the interview is complete
 		this.interviewComplete = true;
 	}
 
-	public async refreshValues(): Promise<void> {
-		const node = this.getNode()!;
-		const endpoint = this.getEndpoint()!;
+	public async refreshValues(driver: Driver): Promise<void> {
+		const node = this.getNode(driver)!;
+		const endpoint = this.getEndpoint(driver)!;
 		const api = endpoint.commandClasses.Irrigation.withOptions({
 			priority: MessagePriority.NodeQuery,
 		});
 
 		// Query the current system config
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: "Querying irrigation system configuration...",
 			direction: "outbound",
@@ -1170,7 +1135,7 @@ moisture sensor polarity: ${getEnumMemberName(
 					systemConfig.moistureSensorPolarity,
 				)}`;
 			}
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message: logMessage,
 				direction: "inbound",
@@ -1179,7 +1144,7 @@ moisture sensor polarity: ${getEnumMemberName(
 
 		// and status
 		// Query the current system config
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: "Querying irrigation system status...",
 			direction: "outbound",
@@ -1188,14 +1153,14 @@ moisture sensor polarity: ${getEnumMemberName(
 
 		// for each valve, query the current status and configuration
 		if (this.supportsMasterValveCached()) {
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message: "Querying master valve configuration...",
 				direction: "outbound",
 			});
 			await api.getValveConfig("master");
 
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message: "Querying master valve status...",
 				direction: "outbound",
@@ -1204,7 +1169,7 @@ moisture sensor polarity: ${getEnumMemberName(
 		}
 
 		for (let i = 1; i <= this.getNumValvesCached(); i++) {
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message: `Querying configuration for valve ${padStart(
 					i.toString(),
@@ -1215,7 +1180,7 @@ moisture sensor polarity: ${getEnumMemberName(
 			});
 			await api.getValveConfig(i);
 
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message: `Querying status for valve ${padStart(
 					i.toString(),
@@ -1244,10 +1209,10 @@ moisture sensor polarity: ${getEnumMemberName(
 @CCCommand(IrrigationCommand.SystemInfoReport)
 export class IrrigationCCSystemInfoReport extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 4);
 		this.supportsMasterValve = !!(this.payload[0] & 0x01);
 		this.numValves = this.payload[1];
@@ -1289,10 +1254,10 @@ export class IrrigationCCSystemInfoGet extends IrrigationCC {}
 @CCCommand(IrrigationCommand.SystemStatusReport)
 export class IrrigationCCSystemStatusReport extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 2);
 		this.systemVoltage = this.payload[0];
 		this.flowSensorActive = !!(this.payload[1] & 0x01);
@@ -1505,12 +1470,12 @@ export type IrrigationCCSystemConfigSetOptions = {
 @CCCommand(IrrigationCommand.SystemConfigSet)
 export class IrrigationCCSystemConfigSet extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| (IrrigationCCSystemConfigSetOptions & CCCommandOptions),
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -1580,10 +1545,10 @@ export class IrrigationCCSystemConfigSet extends IrrigationCC {
 @CCCommand(IrrigationCommand.SystemConfigReport)
 export class IrrigationCCSystemConfigReport extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 2);
 		this.masterValveDelay = this.payload[0];
 		let offset = 1;
@@ -1691,10 +1656,10 @@ export class IrrigationCCSystemConfigGet extends IrrigationCC {}
 @CCCommand(IrrigationCommand.ValveInfoReport)
 export class IrrigationCCValveInfoReport extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 4);
 		if ((this.payload[0] & 0b1) === ValveType.MasterValve) {
 			this.valveId = "master";
@@ -1877,12 +1842,12 @@ export interface IrrigationCCValveInfoGetOptions extends CCCommandOptions {
 )
 export class IrrigationCCValveInfoGet extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| IrrigationCCValveInfoGetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -1929,12 +1894,12 @@ export type IrrigationCCValveConfigSetOptions = {
 @CCCommand(IrrigationCommand.ValveConfigSet)
 export class IrrigationCCValveConfigSet extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| (IrrigationCCValveConfigSetOptions & CCCommandOptions),
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -2003,10 +1968,10 @@ export class IrrigationCCValveConfigSet extends IrrigationCC {
 @CCCommand(IrrigationCommand.ValveConfigReport)
 export class IrrigationCCValveConfigReport extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 4);
 		if ((this.payload[0] & 0b1) === ValveType.MasterValve) {
 			this.valveId = "master";
@@ -2169,12 +2134,12 @@ interface IrrigationCCValveConfigGetOptions extends CCCommandOptions {
 )
 export class IrrigationCCValveConfigGet extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| IrrigationCCValveConfigGetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -2214,12 +2179,12 @@ interface IrrigationCCValveRunOptions extends CCCommandOptions {
 @CCCommand(IrrigationCommand.ValveRun)
 export class IrrigationCCValveRun extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| IrrigationCCValveRunOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -2270,12 +2235,12 @@ interface IrrigationCCValveTableSetOptions extends CCCommandOptions {
 @CCCommand(IrrigationCommand.ValveTableSet)
 export class IrrigationCCValveTableSet extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| IrrigationCCValveTableSetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -2334,10 +2299,10 @@ export class IrrigationCCValveTableSet extends IrrigationCC {
 @CCCommand(IrrigationCommand.ValveTableReport)
 export class IrrigationCCValveTableReport extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload((this.payload.length - 1) % 3 === 0);
 		this.tableId = this.payload[0];
 		this.entries = [];
@@ -2391,12 +2356,12 @@ function testResponseForIrrigationValveTableGet(
 )
 export class IrrigationCCValveTableGet extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| IrrigationCCValveTableGetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -2432,12 +2397,12 @@ interface IrrigationCCValveTableRunOptions extends CCCommandOptions {
 @CCCommand(IrrigationCommand.ValveTableRun)
 export class IrrigationCCValveTableRun extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| IrrigationCCValveTableRunOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -2485,12 +2450,12 @@ interface IrrigationCCSystemShutoffOptions extends CCCommandOptions {
 @CCCommand(IrrigationCommand.SystemShutoff)
 export class IrrigationCCSystemShutoff extends IrrigationCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| IrrigationCCSystemShutoffOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(

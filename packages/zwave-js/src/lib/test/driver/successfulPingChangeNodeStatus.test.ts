@@ -1,10 +1,9 @@
-import { MessageHeaders, MockSerialPort } from "@zwave-js/serial";
+import { FunctionType, MessageHeaders, MockSerialPort } from "@zwave-js/serial";
 import { getEnumMemberName } from "@zwave-js/shared";
 import { wait } from "alcalzone-shared/async";
 import type { Driver } from "../../driver/Driver";
-import { FunctionType } from "../../message/Constants";
 import { ZWaveNode } from "../../node/Node";
-import { NodeStatus } from "../../node/Types";
+import { NodeStatus } from "../../node/_Types";
 import { createAndStartDriver } from "../utils";
 
 // Test mock for isFunctionSupported to control which commands are getting used
@@ -30,6 +29,7 @@ describe("When a ping succeeds, the node should be marked awake/alive", () => {
 			isFunctionSupported,
 			nodes: new Map(),
 			incrementStatistics: () => {},
+			removeAllListeners: () => {},
 		} as any;
 	});
 

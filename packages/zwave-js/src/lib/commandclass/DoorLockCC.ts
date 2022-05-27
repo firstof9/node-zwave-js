@@ -14,11 +14,12 @@ import {
 	ZWaveError,
 	ZWaveErrorCodes,
 } from "@zwave-js/core";
+import type { ZWaveHost } from "@zwave-js/host";
+import { MessagePriority } from "@zwave-js/serial";
 import { getEnumMemberName, pick } from "@zwave-js/shared";
 import { validateArgs } from "@zwave-js/transformers";
 import { isArray } from "alcalzone-shared/typeguards";
 import type { Driver } from "../driver/Driver";
-import { MessagePriority } from "../message/Constants";
 import {
 	PhysicalCCAPI,
 	PollValueImplementation,
@@ -41,39 +42,12 @@ import {
 	gotDeserializationOptions,
 	implementedVersion,
 } from "./CommandClass";
-
-// All the supported commands
-export enum DoorLockCommand {
-	OperationSet = 0x01,
-	OperationGet = 0x02,
-	OperationReport = 0x03,
-	ConfigurationSet = 0x04,
-	ConfigurationGet = 0x05,
-	ConfigurationReport = 0x06,
-	CapabilitiesGet = 0x07,
-	CapabilitiesReport = 0x08,
-}
-
-// @publicAPI
-export enum DoorLockMode {
-	Unsecured = 0x00,
-	UnsecuredWithTimeout = 0x01,
-	InsideUnsecured = 0x10,
-	InsideUnsecuredWithTimeout = 0x11,
-	OutsideUnsecured = 0x20,
-	OutsideUnsecuredWithTimeout = 0x21,
-	Unknown = 0xfe,
-	Secured = 0xff,
-}
-
-// @publicAPI
-export enum DoorLockOperationType {
-	Constant = 0x01,
-	Timed = 0x02,
-}
-
-// @publicAPI
-export type DoorHandleStatus = [boolean, boolean, boolean, boolean];
+import {
+	DoorHandleStatus,
+	DoorLockCommand,
+	DoorLockMode,
+	DoorLockOperationType,
+} from "./_Types";
 
 export function getTargetModeValueId(endpoint: number): ValueID {
 	return {
@@ -207,7 +181,7 @@ export class DoorLockCCAPI extends PhysicalCCAPI {
 			await this.set(value);
 
 			// Verify the current value after a delay
-			this.schedulePoll({ property });
+			this.schedulePoll({ property }, value);
 		} else if (
 			typeof property === "string" &&
 			configurationSetParameters.includes(property as any)
@@ -343,7 +317,7 @@ export class DoorLockCCAPI extends PhysicalCCAPI {
 		}
 	}
 
-	@validateArgs()
+	@validateArgs({ strictEnums: true })
 	public async set(mode: DoorLockMode): Promise<void> {
 		this.assertSupportsCommand(
 			DoorLockCommand,
@@ -411,14 +385,14 @@ export class DoorLockCCAPI extends PhysicalCCAPI {
 export class DoorLockCC extends CommandClass {
 	declare ccCommand: DoorLockCommand;
 
-	public async interview(): Promise<void> {
-		const node = this.getNode()!;
-		const endpoint = this.getEndpoint()!;
+	public async interview(driver: Driver): Promise<void> {
+		const node = this.getNode(driver)!;
+		const endpoint = this.getEndpoint(driver)!;
 		const api = endpoint.commandClasses["Door Lock"].withOptions({
 			priority: MessagePriority.NodeQuery,
 		});
 
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: `Interviewing ${this.ccName}...`,
 			direction: "none",
@@ -434,7 +408,7 @@ export class DoorLockCC extends CommandClass {
 		let latchSupported = true;
 
 		if (this.version >= 4) {
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message: "requesting lock capabilities...",
 				direction: "outbound",
@@ -460,7 +434,7 @@ supports auto-relock:      ${resp.autoRelockSupported}
 supports hold-and-release: ${resp.holdAndReleaseSupported}
 supports twist assist:     ${resp.twistAssistSupported}
 supports block to block:   ${resp.blockToBlockSupported}`;
-				this.driver.controllerLog.logNode(node.id, {
+				driver.controllerLog.logNode(node.id, {
 					endpoint: this.endpointIndex,
 					message: logMessage,
 					direction: "inbound",
@@ -494,35 +468,49 @@ supports block to block:   ${resp.blockToBlockSupported}`;
 			}
 		}
 
-		// Create or delete metadata for the status values, depending on support
-		const valueDB = this.getValueDB();
-		valueDB.setMetadata(
-			getDoorStatusValueId(this.endpointIndex),
-			doorSupported ? getDoorStatusValueMetadata() : undefined,
-		);
-		valueDB.setMetadata(
-			getBoltStatusValueId(this.endpointIndex),
-			boltSupported ? getBoltStatusValueMetadata() : undefined,
-		);
-		valueDB.setMetadata(
-			getLatchStatusValueId(this.endpointIndex),
-			latchSupported ? getLatchStatusValueMetadata() : undefined,
-		);
+		if (!hadCriticalTimeout) {
+			// Save support information for the status values
+			const valueDB = this.getValueDB();
+			valueDB.setMetadata(
+				getDoorStatusValueId(this.endpointIndex),
+				doorSupported ? getDoorStatusValueMetadata() : undefined,
+			);
+			valueDB.setValue(
+				getDoorSupportedValueId(this.endpointIndex),
+				doorSupported,
+			);
+			valueDB.setMetadata(
+				getLatchStatusValueId(this.endpointIndex),
+				latchSupported ? getLatchStatusValueMetadata() : undefined,
+			);
+			valueDB.setValue(
+				getLatchSupportedValueId(this.endpointIndex),
+				latchSupported,
+			);
+			valueDB.setMetadata(
+				getBoltStatusValueId(this.endpointIndex),
+				boltSupported ? getBoltStatusValueMetadata() : undefined,
+			);
+			valueDB.setValue(
+				getBoltSupportedValueId(this.endpointIndex),
+				boltSupported,
+			);
+		}
 
-		await this.refreshValues();
+		await this.refreshValues(driver);
 
 		// Remember that the interview is complete
 		if (!hadCriticalTimeout) this.interviewComplete = true;
 	}
 
-	public async refreshValues(): Promise<void> {
-		const node = this.getNode()!;
-		const endpoint = this.getEndpoint()!;
+	public async refreshValues(driver: Driver): Promise<void> {
+		const node = this.getNode(driver)!;
+		const endpoint = this.getEndpoint(driver)!;
 		const api = endpoint.commandClasses["Door Lock"].withOptions({
 			priority: MessagePriority.NodeQuery,
 		});
 
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: "requesting lock configuration...",
 			direction: "outbound",
@@ -554,14 +542,14 @@ twist assist                   ${!!config.twistAssist}
 block to block                 ${!!config.blockToBlock}`;
 			}
 
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message: logMessage,
 				direction: "inbound",
 			});
 		}
 
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: "requesting current lock status...",
 			direction: "outbound",
@@ -591,7 +579,7 @@ bolt status:        ${status.boltStatus}`;
 				logMessage += `
 latch status:       ${status.latchStatus}`;
 			}
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message: logMessage,
 				direction: "inbound",
@@ -607,12 +595,12 @@ interface DoorLockCCOperationSetOptions extends CCCommandOptions {
 @CCCommand(DoorLockCommand.OperationSet)
 export class DoorLockCCOperationSet extends DoorLockCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| DoorLockCCOperationSetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -650,10 +638,10 @@ export class DoorLockCCOperationSet extends DoorLockCC {
 @CCCommand(DoorLockCommand.OperationReport)
 export class DoorLockCCOperationReport extends DoorLockCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 5);
 
 		const valueDB = this.getValueDB();
@@ -747,7 +735,7 @@ export class DoorLockCCOperationReport extends DoorLockCC {
 
 	@ccValue({ minVersion: 3 })
 	@ccValueMetadata({
-		...ValueMetadata.ReadOnly,
+		...ValueMetadata.ReadOnlyDuration,
 		label: "Remaining duration until target lock mode",
 	})
 	public readonly duration?: Duration;
@@ -820,10 +808,10 @@ export class DoorLockCCOperationGet extends DoorLockCC {}
 @CCCommand(DoorLockCommand.ConfigurationReport)
 export class DoorLockCCConfigurationReport extends DoorLockCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 4);
 
 		this.operationType = this.payload[0];
@@ -979,12 +967,12 @@ type DoorLockCCConfigurationSetOptions = (
 @CCCommand(DoorLockCommand.ConfigurationSet)
 export class DoorLockCCConfigurationSet extends DoorLockCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| (CCCommandOptions & DoorLockCCConfigurationSetOptions),
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -1125,10 +1113,10 @@ export class DoorLockCCConfigurationSet extends DoorLockCC {
 @CCCommand(DoorLockCommand.CapabilitiesReport)
 export class DoorLockCCCapabilitiesReport extends DoorLockCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 
 		// parse variable length operation type bit mask
 		validatePayload(this.payload.length >= 1);
@@ -1183,13 +1171,8 @@ export class DoorLockCCCapabilitiesReport extends DoorLockCC {
 	@ccValue({ internal: true, minVersion: 4 })
 	public readonly supportedInsideHandles: DoorHandleStatus;
 
-	@ccValue({ internal: true, minVersion: 4 })
 	public readonly latchSupported: boolean;
-
-	@ccValue({ internal: true, minVersion: 4 })
 	public readonly boltSupported: boolean;
-
-	@ccValue({ internal: true, minVersion: 4 })
 	public readonly doorSupported: boolean;
 
 	@ccValue({ internal: true, minVersion: 4 })

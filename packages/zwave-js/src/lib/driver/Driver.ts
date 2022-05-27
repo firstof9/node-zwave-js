@@ -3,6 +3,7 @@ import * as Sentry from "@sentry/node";
 import { ConfigManager, externalConfigDir } from "@zwave-js/config";
 import {
 	CommandClasses,
+	ControllerLogger,
 	deserializeCacheValue,
 	dskFromString,
 	Duration,
@@ -17,13 +18,23 @@ import {
 	serializeCacheValue,
 	SPANState,
 	timespan,
+	ValueDB,
 	ValueMetadata,
 	ZWaveError,
 	ZWaveErrorCodes,
 	ZWaveLogContainer,
 } from "@zwave-js/core";
+import type { ZWaveHost } from "@zwave-js/host";
 import {
+	FunctionType,
+	getDefaultPriority,
+	INodeQuery,
+	isNodeQuery,
+	isSuccessIndicator,
+	Message,
 	MessageHeaders,
+	MessagePriority,
+	MessageType,
 	ZWaveSerialPort,
 	ZWaveSerialPortBase,
 	ZWaveSocket,
@@ -35,6 +46,8 @@ import {
 	mergeDeep,
 	num2hex,
 	pick,
+	ReadonlyThrowingMap,
+	ThrowingMap,
 	TypedEventEmitter,
 } from "@zwave-js/shared";
 import { wait } from "alcalzone-shared/async";
@@ -55,6 +68,7 @@ import {
 	FirmwareUpdateStatus,
 	Security2CC,
 	Security2CCNonceReport,
+	SupervisionResult,
 } from "../commandclass";
 import {
 	assertValidCCs,
@@ -82,8 +96,6 @@ import {
 	SupervisionCC,
 	SupervisionCCGet,
 	SupervisionCCReport,
-	SupervisionResult,
-	SupervisionStatus,
 } from "../commandclass/SupervisionCC";
 import {
 	isTransportServiceEncapsulation,
@@ -98,26 +110,36 @@ import {
 	getWakeUpIntervalValueId,
 	WakeUpCCNoMoreInformation,
 } from "../commandclass/WakeUpCC";
-import { ApplicationCommandRequest } from "../controller/ApplicationCommandRequest";
+import { SupervisionStatus } from "../commandclass/_Types";
+import { ZWaveController } from "../controller/Controller";
+import {
+	InclusionState,
+	ProvisioningEntryStatus,
+} from "../controller/Inclusion";
+import { TransmitOptions, TXReport } from "../controller/_Types";
+import { DriverLogger } from "../log/Driver";
+import type { ZWaveNode } from "../node/Node";
+import { InterviewStage, NodeStatus } from "../node/_Types";
+import { ApplicationCommandRequest } from "../serialapi/application/ApplicationCommandRequest";
 import {
 	ApplicationUpdateRequest,
 	ApplicationUpdateRequestNodeInfoReceived,
 	ApplicationUpdateRequestSmartStartHomeIDReceived,
-} from "../controller/ApplicationUpdateRequest";
-import { BridgeApplicationCommandRequest } from "../controller/BridgeApplicationCommandRequest";
-import { ZWaveController } from "../controller/Controller";
-import { GetControllerVersionRequest } from "../controller/GetControllerVersionMessages";
-import { InclusionState } from "../controller/Inclusion";
+} from "../serialapi/application/ApplicationUpdateRequest";
+import { BridgeApplicationCommandRequest } from "../serialapi/application/BridgeApplicationCommandRequest";
+import type { SerialAPIStartedRequest } from "../serialapi/application/SerialAPIStartedRequest";
+import { GetControllerVersionRequest } from "../serialapi/capability/GetControllerVersionMessages";
+import { SoftResetRequest } from "../serialapi/misc/SoftResetRequest";
 import {
 	SendDataBridgeRequest,
 	SendDataMulticastBridgeRequest,
-} from "../controller/SendDataBridgeMessages";
+} from "../serialapi/transport/SendDataBridgeMessages";
 import {
 	MAX_SEND_ATTEMPTS,
 	SendDataAbort,
 	SendDataMulticastRequest,
 	SendDataRequest,
-} from "../controller/SendDataMessages";
+} from "../serialapi/transport/SendDataMessages";
 import {
 	hasTXReport,
 	isSendData,
@@ -125,23 +147,7 @@ import {
 	isSendDataTransmitReport,
 	isTransmitReport,
 	SendDataMessage,
-	TransmitOptions,
-	TXReport,
-} from "../controller/SendDataShared";
-import { SoftResetRequest } from "../controller/SoftResetRequest";
-import { ControllerLogger } from "../log/Controller";
-import { DriverLogger } from "../log/Driver";
-import {
-	FunctionType,
-	MessagePriority,
-	MessageType,
-} from "../message/Constants";
-import { getDefaultPriority, Message } from "../message/Message";
-import { isSuccessIndicator } from "../message/SuccessIndicator";
-import { INodeQuery, isNodeQuery } from "../node/INodeQuery";
-import type { ZWaveNode } from "../node/Node";
-import { InterviewStage, NodeStatus } from "../node/Types";
-import type { SerialAPIStartedRequest } from "../serialapi/misc/SerialAPIStartedRequest";
+} from "../serialapi/transport/SendDataShared";
 import { reportMissingDeviceConfig } from "../telemetry/deviceConfig";
 import { initSentry } from "../telemetry/sentry";
 import {
@@ -215,7 +221,6 @@ const defaultOptions: ZWaveOptions = {
 	// By default enable soft reset unless the env variable is set
 	enableSoftReset: !process.env.ZWAVEJS_DISABLE_SOFT_RESET,
 	interview: {
-		skipInterview: false,
 		queryAllUserCodes: false,
 	},
 	storage: {
@@ -443,7 +448,10 @@ export type DriverEvents = Extract<keyof DriverEventCallbacks, string>;
  * Any action you want to perform on the Z-Wave network must go through a driver
  * instance or its associated nodes.
  */
-export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
+export class Driver
+	extends TypedEventEmitter<DriverEventCallbacks>
+	implements ZWaveHost
+{
 	public constructor(
 		private port: string,
 		options?: DeepPartial<ZWaveOptions>,
@@ -462,8 +470,6 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 
 		// Initialize the cache
 		this.cacheDir = this.options.storage.cacheDir;
-
-		// TODO: Load provisioning list
 
 		// Initialize config manager
 		this.configManager = new ConfigManager({
@@ -612,6 +618,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 		// 	}
 		// });
 	}
+
 	/** The serial port instance */
 	private serial: ZWaveSerialPortBase | undefined;
 	/** An instance of the Send Thread state machine */
@@ -706,6 +713,31 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 		return this._securityManager2;
 	}
 
+	/** @internal This is needed for the ZWaveHost interface */
+	public get homeId(): number {
+		return this.controller.homeId!;
+	}
+
+	/** @internal This is needed for the ZWaveHost interface */
+	public get ownNodeId(): number {
+		return this.controller.ownNodeId!;
+	}
+
+	/** @internal This is needed for the ZWaveHost interface */
+	public get nodes(): ReadonlyThrowingMap<number, ZWaveNode> {
+		return this.controller.nodes;
+	}
+
+	public getNodeUnsafe(msg: Message): ZWaveNode | undefined {
+		const nodeId = msg.getNodeId();
+		if (nodeId != undefined) return this.controller.nodes.get(nodeId);
+	}
+
+	public getValueDB(nodeId: number): ValueDB {
+		const node = this.controller.nodes.getOrThrow(nodeId);
+		return node.valueDB;
+	}
+
 	/** Updates the logging configuration without having to restart the driver. */
 	public updateLogConfig(config: DeepPartial<LogConfig>): void {
 		this._logContainer.updateConfiguration(config);
@@ -750,8 +782,11 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 		if (this._wasStarted) return Promise.resolve();
 		this._wasStarted = true;
 
-		// Enforce that an error handler is attached
-		if ((this as unknown as EventEmitter).listenerCount("error") === 0) {
+		// Enforce that an error handler is attached, except for testing with a mocked serialport
+		if (
+			!this.options.testingHooks &&
+			(this as unknown as EventEmitter).listenerCount("error") === 0
+		) {
 			throw new ZWaveError(
 				`Before starting the driver, a handler for the "error" event must be attached.`,
 				ZWaveErrorCodes.Driver_NoErrorHandler,
@@ -781,7 +816,11 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 			);
 		} else {
 			this.driverLog.print(`opening serial port ${this.port}`);
-			this.serial = new ZWaveSerialPort(this.port, this._logContainer);
+			this.serial = new ZWaveSerialPort(
+				this.port,
+				this._logContainer,
+				this.options.testingHooks?.serialPortBinding,
+			);
 		}
 		this.serial
 			.on("data", this.serialport_onData.bind(this))
@@ -825,6 +864,13 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 			this._isOpen = true;
 			spOpenPromise.resolve();
 
+			if (
+				typeof this.options.testingHooks?.onSerialPortOpen ===
+				"function"
+			) {
+				await this.options.testingHooks.onSerialPortOpen(this.serial!);
+			}
+
 			// Perform initialization sequence
 			await this.writeHeader(MessageHeaders.NAK);
 			// Per the specs, this should be followed by a soft-reset but we need to be able
@@ -855,20 +901,22 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 			}
 
 			// Load the necessary configuration
-			this.driverLog.print("loading configuration...");
-			try {
-				await this.configManager.loadAll();
-			} catch (e) {
-				const message = `Failed to load the configuration: ${getErrorMessage(
-					e,
-				)}`;
-				this.driverLog.print(message, "error");
-				this.emit(
-					"error",
-					new ZWaveError(message, ZWaveErrorCodes.Driver_Failed),
-				);
-				void this.destroy();
-				return;
+			if (this.options.testingHooks?.loadConfiguration !== false) {
+				this.driverLog.print("loading configuration...");
+				try {
+					await this.configManager.loadAll();
+				} catch (e) {
+					const message = `Failed to load the configuration: ${getErrorMessage(
+						e,
+					)}`;
+					this.driverLog.print(message, "error");
+					this.emit(
+						"error",
+						new ZWaveError(message, ZWaveErrorCodes.Driver_Failed),
+					);
+					void this.destroy();
+					return;
+				}
 			}
 
 			this.driverLog.print("beginning interview...");
@@ -1057,7 +1105,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 				.on("node removed", this.onNodeRemoved.bind(this));
 		}
 
-		if (!this.options.interview.skipInterview) {
+		if (!this.options.testingHooks?.skipControllerIdentification) {
 			// Determine controller IDs to open the Value DBs
 			// We need to do this first because some older controllers, especially the UZB1 and
 			// some 500-series sticks in virtualized environments don't respond after a soft reset
@@ -1206,7 +1254,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 		this._nodesReady.clear();
 		this._nodesReadyEventEmitted = false;
 
-		if (!this.options.interview.skipInterview) {
+		if (!this.options.testingHooks?.skipNodeInterview) {
 			// Now interview all nodes
 			// First complete the controller interview
 			const controllerNode = this._controller.nodes.get(
@@ -1653,7 +1701,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 	/** This is called when a new node has been added to the network */
 	private onNodeAdded(node: ZWaveNode): void {
 		this.addNodeEventHandlers(node);
-		if (!this.options.interview.skipInterview) {
+		if (!this.options.testingHooks?.skipNodeInterview) {
 			// Interview the node
 			// don't await the interview, because it may take a very long time
 			// if a node is asleep
@@ -1663,10 +1711,23 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 
 	/** This is called when a node was removed from the network */
 	private onNodeRemoved(node: ZWaveNode, replaced: boolean): void {
-		// Remove all listeners
+		// Remove all listeners and timers
 		this.removeNodeEventHandlers(node);
+		if (this.sendNodeToSleepTimers.has(node.id)) {
+			clearTimeout(this.sendNodeToSleepTimers.get(node.id)!);
+			this.sendNodeToSleepTimers.delete(node.id);
+		}
+		if (this.retryNodeInterviewTimeouts.has(node.id)) {
+			clearTimeout(this.retryNodeInterviewTimeouts.get(node.id)!);
+			this.retryNodeInterviewTimeouts.delete(node.id);
+		}
 		// purge node values from the DB
 		node.valueDB.clear();
+		this.cachePurge(cacheKeys.node(node.id)._baseKey);
+
+		// Remove the node from all security manager instances
+		this.securityManager?.deleteAllNoncesForReceiver(node.id);
+		this.securityManager2?.deleteNonce(node.id);
 
 		this.rejectAllTransactionsForNode(
 			node.id,
@@ -2039,7 +2100,9 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 	 */
 	public async hardReset(): Promise<void> {
 		this.ensureReady(true);
-		// Calling ensureReady with true ensures that _controller is defined
+
+		// Update the controller NIF prior to hard resetting
+		await this._controller!.setControllerNIF();
 		await this._controller!.hardReset();
 
 		// Clean up
@@ -2146,8 +2209,14 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 			if (timeout) clearTimeout(timeout);
 		}
 
-		// Destroy all nodes
-		this._controller?.nodes.forEach((n) => n.destroy());
+		// Destroy all nodes and the controller
+		if (this._controller) {
+			this._controller.nodes.forEach((n) => n.destroy());
+			(this._controller.nodes as ThrowingMap<any, any>).clear();
+
+			this._controller.removeAllListeners();
+			this._controller = undefined;
+		}
 
 		this.driverLog.print(`driver instance destroyed`);
 
@@ -2198,7 +2267,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 			}
 			if (!!this._controller) {
 				if (isCommandClassContainer(msg)) {
-					msg.getNodeUnsafe()?.incrementStatistics("commandsRX");
+					this.getNodeUnsafe(msg)?.incrementStatistics("commandsRX");
 				} else {
 					this._controller.incrementStatistics("messagesRX");
 				}
@@ -2214,7 +2283,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 					if (response) await this.writeHeader(response);
 					if (!!this._controller) {
 						if (isCommandClassContainer(msg)) {
-							msg.getNodeUnsafe()?.incrementStatistics(
+							this.getNodeUnsafe(msg)?.incrementStatistics(
 								"commandsDroppedRX",
 							);
 
@@ -2226,8 +2295,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 								msg.command instanceof InvalidCC
 							) {
 								// If it was, we need to notify the sender that we couldn't decode the command
-								await msg
-									.getNodeUnsafe()
+								await this.getNodeUnsafe(msg)
 									?.createAPI(
 										CommandClasses.Supervision,
 										false,
@@ -2273,7 +2341,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 					msg.command instanceof
 					SecurityCCCommandEncapsulationNonceGet
 				) {
-					void msg.getNodeUnsafe()?.handleSecurityNonceGet();
+					void this.getNodeUnsafe(msg)?.handleSecurityNonceGet();
 				}
 
 				// Transport Service commands must be handled before assembling partial CCs
@@ -2547,7 +2615,7 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 			message: INodeQuery;
 		},
 	): boolean {
-		const node = transaction.message.getNodeUnsafe();
+		const node = this.getNodeUnsafe(transaction.message);
 		if (!node) return false; // This should never happen, but whatever
 
 		const messagePart1 = isSendData(transaction.message)
@@ -2936,7 +3004,7 @@ ${handlers.length} left`,
 		let handlers: RequestHandlerEntry[] | undefined;
 
 		if (isNodeQuery(msg) || isCommandClassContainer(msg)) {
-			const node = msg.getNodeUnsafe();
+			const node = this.getNodeUnsafe(msg);
 			if (node) {
 				// We have received an unsolicited message from a dead node, bring it back to life
 				if (node.status === NodeStatus.Dead) {
@@ -2958,7 +3026,7 @@ ${handlers.length} left`,
 			// For further actions, we are only interested in the innermost CC
 			this.unwrapCommands(msg);
 
-			const node = msg.getNodeUnsafe();
+			const node = this.getNodeUnsafe(msg);
 			// If we receive an encrypted message but assume the node is insecure, change our assumption
 			if (
 				node?.isSecure === false &&
@@ -3105,7 +3173,7 @@ ${handlers.length} left`,
 			return;
 		} else if (msg instanceof ApplicationUpdateRequest) {
 			if (msg instanceof ApplicationUpdateRequestNodeInfoReceived) {
-				const node = msg.getNodeUnsafe();
+				const node = this.getNodeUnsafe(msg);
 				if (node) {
 					this.controllerLog.logNode(node.id, {
 						message: "Received updated node info",
@@ -3154,6 +3222,14 @@ ${handlers.length} left`,
 				if (!provisioningEntry) {
 					this.controllerLog.print(
 						"NWI Home ID not found in provisioning list, ignoring request...",
+					);
+					return;
+				} else if (
+					provisioningEntry.status ===
+					ProvisioningEntryStatus.Inactive
+				) {
+					this.controllerLog.print(
+						"The provisioning entry for this node is inactive, ignoring request...",
 					);
 					return;
 				}
@@ -3263,7 +3339,7 @@ ${handlers.length} left`,
 
 		// When a node supports S2 and has a valid security class, the command
 		// must be S2-encapsulated
-		const node = msg.command.getNode();
+		const node = msg.command.getNode(this);
 		if (node?.supportsCC(CommandClasses["Security 2"])) {
 			const securityClass = node.getHighestSecurityClass();
 			if (
@@ -3308,7 +3384,7 @@ ${handlers.length} left`,
 		result: Message | undefined,
 	): void {
 		// Update statistics
-		const node = msg.getNodeUnsafe();
+		const node = this.getNodeUnsafe(msg);
 		let success = true;
 		if (isSendData(msg) || isNodeQuery(msg)) {
 			// This shouldn't happen, but just in case
@@ -3373,7 +3449,7 @@ ${handlers.length} left`,
 
 		// Don't send messages to dead nodes
 		if (isNodeQuery(msg) || isCommandClassContainer(msg)) {
-			node = msg.getNodeUnsafe();
+			node = this.getNodeUnsafe(msg);
 			if (!messageIsPing(msg) && node?.status === NodeStatus.Dead) {
 				// Instead of throwing immediately, try to ping the node first - if it responds, continue
 				if (!(await node.ping())) {
@@ -3668,7 +3744,7 @@ ${handlers.length} left`,
 		}
 
 		// Check if the target supports this command
-		if (!command.getNode()?.supportsCC(CommandClasses.Supervision)) {
+		if (!command.getNode(this)?.supportsCC(CommandClasses.Supervision)) {
 			throw new ZWaveError(
 				`Node ${nodeId} does not support the Supervision CC!`,
 				ZWaveErrorCodes.CC_NotSupported,
@@ -3713,7 +3789,7 @@ ${handlers.length} left`,
 		command: CommandClass,
 		options?: SendSupervisedCommandOptions,
 	): Promise<SupervisionResult | undefined> {
-		if (command.getNode()?.supportsCC(CommandClasses.Supervision)) {
+		if (command.getNode(this)?.supportsCC(CommandClasses.Supervision)) {
 			return this.sendSupervisedCommand(command, options);
 		} else {
 			await this.sendCommand(command, options);
@@ -3971,6 +4047,14 @@ ${handlers.length} left`,
 			this.networkCache.delete(cacheKey);
 		} else {
 			this.networkCache.set(cacheKey, value);
+		}
+	}
+
+	private cachePurge(prefix: string): void {
+		for (const key of this.networkCache.keys()) {
+			if (key.startsWith(prefix)) {
+				this.networkCache.delete(key);
+			}
 		}
 	}
 

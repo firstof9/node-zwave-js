@@ -9,14 +9,17 @@ import {
 	ZWaveError,
 	ZWaveErrorCodes,
 } from "@zwave-js/core";
+import type { FileSystem } from "@zwave-js/host";
 import { getEnumMemberName, num2hex, pickDeep } from "@zwave-js/shared";
 import { isArray, isObject } from "alcalzone-shared/typeguards";
 import path from "path";
-import type { SmartStartProvisioningEntry } from "../controller/Inclusion";
+import {
+	ProvisioningEntryStatus,
+	SmartStartProvisioningEntry,
+} from "../controller/Inclusion";
 import { DeviceClass } from "../node/DeviceClass";
-import { InterviewStage } from "../node/Types";
+import { InterviewStage } from "../node/_Types";
 import type { Driver } from "./Driver";
-import type { FileSystem } from "./FileSystem";
 
 /**
  * Defines the keys that are used to store certain properties in the network cache.
@@ -27,39 +30,42 @@ export const cacheKeys = {
 		supportsSoftReset: "controller.supportsSoftReset",
 	},
 	// TODO: somehow these functions should be combined with the pattern matching below
-	node: (nodeId: number) => ({
-		_baseKey: `node.${nodeId}`,
-		_securityClassBaseKey: `node.${nodeId}.securityClasses`,
-		interviewStage: `node.${nodeId}.interviewStage`,
-		deviceClass: `node.${nodeId}.deviceClass`,
-		isListening: `node.${nodeId}.isListening`,
-		isFrequentListening: `node.${nodeId}.isFrequentListening`,
-		isRouting: `node.${nodeId}.isRouting`,
-		supportedDataRates: `node.${nodeId}.supportedDataRates`,
-		protocolVersion: `node.${nodeId}.protocolVersion`,
-		nodeType: `node.${nodeId}.nodeType`,
-		supportsSecurity: `node.${nodeId}.supportsSecurity`,
-		supportsBeaming: `node.${nodeId}.supportsBeaming`,
-		securityClass: (secClass: SecurityClass) =>
-			`node.${nodeId}.securityClasses.${getEnumMemberName(
-				SecurityClass,
-				secClass,
-			)}`,
-		dsk: `node.${nodeId}.dsk`,
-		endpoint: (index: number) => {
-			const baseKey = `node.${nodeId}.endpoint.${index}`;
-			const ccBaseKey = `${baseKey}.commandClass`;
-			return {
-				_baseKey: baseKey,
-				_ccBaseKey: ccBaseKey,
-				commandClass: (ccId: CommandClasses) => {
-					const ccAsHex = num2hex(ccId);
-					return `${ccBaseKey}.${ccAsHex}`;
-				},
-			};
-		},
-		hasSUCReturnRoute: `node.${nodeId}.hasSUCReturnRoute`,
-	}),
+	node: (nodeId: number) => {
+		const nodeBaseKey = `node.${nodeId}.`;
+		return {
+			_baseKey: nodeBaseKey,
+			_securityClassBaseKey: `${nodeBaseKey}securityClasses`,
+			interviewStage: `${nodeBaseKey}interviewStage`,
+			deviceClass: `${nodeBaseKey}deviceClass`,
+			isListening: `${nodeBaseKey}isListening`,
+			isFrequentListening: `${nodeBaseKey}isFrequentListening`,
+			isRouting: `${nodeBaseKey}isRouting`,
+			supportedDataRates: `${nodeBaseKey}supportedDataRates`,
+			protocolVersion: `${nodeBaseKey}protocolVersion`,
+			nodeType: `${nodeBaseKey}nodeType`,
+			supportsSecurity: `${nodeBaseKey}supportsSecurity`,
+			supportsBeaming: `${nodeBaseKey}supportsBeaming`,
+			securityClass: (secClass: SecurityClass) =>
+				`${nodeBaseKey}securityClasses.${getEnumMemberName(
+					SecurityClass,
+					secClass,
+				)}`,
+			dsk: `${nodeBaseKey}dsk`,
+			endpoint: (index: number) => {
+				const endpointBaseKey = `${nodeBaseKey}endpoint.${index}.`;
+				const ccBaseKey = `${endpointBaseKey}commandClass.`;
+				return {
+					_baseKey: endpointBaseKey,
+					_ccBaseKey: ccBaseKey,
+					commandClass: (ccId: CommandClasses) => {
+						const ccAsHex = num2hex(ccId);
+						return `${ccBaseKey}${ccAsHex}`;
+					},
+				};
+			},
+			hasSUCReturnRoute: `${nodeBaseKey}hasSUCReturnRoute`,
+		};
+	},
 } as const;
 
 export const cacheKeyUtils = {
@@ -138,6 +144,109 @@ function tryParseNodeType(value: unknown): NodeType | undefined {
 	if (typeof value === "string" && value in NodeType) {
 		return (NodeType as any)[value];
 	}
+}
+
+function tryParseProvisioningList(
+	value: unknown,
+): SmartStartProvisioningEntry[] | undefined {
+	const ret: SmartStartProvisioningEntry[] = [];
+	if (!isArray(value)) return;
+	for (const entry of value) {
+		if (
+			isObject(entry) &&
+			typeof entry.dsk === "string" &&
+			isArray(entry.securityClasses) &&
+			// securityClasses are stored as strings, not the enum values
+			entry.securityClasses.every((s) => isSerializedSecurityClass(s)) &&
+			(entry.requestedSecurityClasses == undefined ||
+				(isArray(entry.requestedSecurityClasses) &&
+					entry.requestedSecurityClasses.every((s) =>
+						isSerializedSecurityClass(s),
+					))) &&
+			(entry.status == undefined ||
+				isSerializedProvisioningEntryStatus(entry.status))
+		) {
+			// This is at least a PlannedProvisioningEntry, maybe it is an IncludedProvisioningEntry
+			if ("nodeId" in entry && typeof entry.nodeId !== "number") {
+				return;
+			}
+
+			const parsed = { ...entry } as SmartStartProvisioningEntry;
+			parsed.securityClasses = entry.securityClasses
+				.map((s) => tryParseSerializedSecurityClass(s))
+				.filter((s): s is SecurityClass => s !== undefined);
+			if (entry.requestedSecurityClasses) {
+				parsed.requestedSecurityClasses = (
+					entry.requestedSecurityClasses as any[]
+				)
+					.map((s) => tryParseSerializedSecurityClass(s))
+					.filter((s): s is SecurityClass => s !== undefined);
+			}
+			if (entry.status != undefined) {
+				parsed.status = ProvisioningEntryStatus[
+					entry.status as any
+				] as any as ProvisioningEntryStatus;
+			}
+			ret.push(parsed);
+		} else {
+			return;
+		}
+	}
+	return ret;
+}
+
+function isSerializedSecurityClass(value: unknown): boolean {
+	// There was an error in previous iterations of the migration code, so we
+	// now have to deal with the following variants:
+	// 1. plain numbers representing a valid Security Class: 1
+	// 2. strings representing a valid Security Class: "S2_Unauthenticated"
+	// 3. strings represending a mis-formatted Security Class: "unknown (0xS2_Unauthenticated)"
+	if (typeof value === "number" && value in SecurityClass) return true;
+	if (typeof value === "string") {
+		if (value.startsWith("unknown (0x") && value.endsWith(")")) {
+			value = value.slice(11, -1);
+		}
+		if (
+			(value as any) in SecurityClass &&
+			typeof SecurityClass[value as any] === "number"
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function tryParseSerializedSecurityClass(
+	value: unknown,
+): SecurityClass | undefined {
+	// There was an error in previous iterations of the migration code, so we
+	// now have to deal with the following variants:
+	// 1. plain numbers representing a valid Security Class: 1
+	// 2. strings representing a valid Security Class: "S2_Unauthenticated"
+	// 3. strings represending a mis-formatted Security Class: "unknown (0xS2_Unauthenticated)"
+
+	if (typeof value === "number" && value in SecurityClass) return value;
+	if (typeof value === "string") {
+		if (value.startsWith("unknown (0x") && value.endsWith(")")) {
+			value = value.slice(11, -1);
+		}
+		if (
+			(value as any) in SecurityClass &&
+			typeof SecurityClass[value as any] === "number"
+		) {
+			return (SecurityClass as any)[value as any];
+		}
+	}
+}
+
+function isSerializedProvisioningEntryStatus(
+	s: unknown,
+): s is keyof typeof ProvisioningEntryStatus {
+	return (
+		typeof s === "string" &&
+		s in ProvisioningEntryStatus &&
+		typeof ProvisioningEntryStatus[s as any] === "number"
+	);
 }
 
 export function deserializeNetworkCacheValue(
@@ -230,36 +339,9 @@ export function deserializeNetworkCacheValue(
 	// Other properties
 	switch (key) {
 		case cacheKeys.controller.provisioningList: {
-			const ret: SmartStartProvisioningEntry[] = [];
-			if (!isArray(value)) throw fail();
-			for (const entry of value) {
-				if (
-					isObject(entry) &&
-					typeof entry.dsk === "string" &&
-					isArray(entry.securityClasses) &&
-					// securityClasses are stored as strings, not the enum values
-					entry.securityClasses.every(
-						(s) =>
-							typeof s === "string" &&
-							s in SecurityClass &&
-							typeof SecurityClass[s as any] === "number",
-					)
-				) {
-					// This is at least a PlannedProvisioningEntry, maybe it is an IncludedProvisioningEntry
-					if ("nodeId" in entry && typeof entry.nodeId !== "number") {
-						throw fail();
-					}
-
-					const parsed = { ...entry } as SmartStartProvisioningEntry;
-					parsed.securityClasses = entry.securityClasses.map(
-						(s) => SecurityClass[s as any] as any as SecurityClass,
-					);
-					ret.push(parsed);
-				} else {
-					throw fail();
-				}
-			}
-			return ret;
+			value = tryParseProvisioningList(value);
+			if (value) return value;
+			throw fail();
 		}
 	}
 
@@ -311,6 +393,18 @@ export function serializeNetworkCacheValue(
 				serialized.securityClasses = entry.securityClasses.map((c) =>
 					getEnumMemberName(SecurityClass, c),
 				);
+				if (entry.requestedSecurityClasses) {
+					serialized.requestedSecurityClasses =
+						entry.requestedSecurityClasses.map((c) =>
+							getEnumMemberName(SecurityClass, c),
+						);
+				}
+				if (entry.status != undefined) {
+					serialized.status = getEnumMemberName(
+						ProvisioningEntryStatus,
+						entry.status,
+					);
+				}
 				ret.push(serialized);
 			}
 			return ret;
@@ -381,6 +475,7 @@ export async function migrateLegacyNetworkCache(
 		cacheKeys.controller.provisioningList,
 		legacy,
 		legacyPaths.controller.provisioningList,
+		tryParseProvisioningList,
 	);
 	tryMigrate(
 		cacheKeys.controller.supportsSoftReset,

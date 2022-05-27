@@ -1,4 +1,5 @@
 import { SPANState, ZWaveError, ZWaveErrorCodes } from "@zwave-js/core";
+import type { Message } from "@zwave-js/serial";
 import {
 	createDeferredPromise,
 	DeferredPromise,
@@ -15,8 +16,10 @@ import {
 	SecurityCCNonceGet,
 	SecurityCCNonceReport,
 } from "../commandclass/SecurityCC";
-import { isSendData, isTransmitReport } from "../controller/SendDataShared";
-import type { Message } from "../message/Message";
+import {
+	isSendData,
+	isTransmitReport,
+} from "../serialapi/transport/SendDataShared";
 import type { Driver, SendCommandOptions } from "./Driver";
 import { sendDataErrorToZWaveError } from "./StateMachineShared";
 import type { MessageGenerator } from "./Transaction";

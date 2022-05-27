@@ -12,6 +12,8 @@ import {
 	ZWaveError,
 	ZWaveErrorCodes,
 } from "@zwave-js/core";
+import type { ZWaveHost } from "@zwave-js/host";
+import { MessagePriority } from "@zwave-js/serial";
 import {
 	getEnumMemberName,
 	isPrintableASCII,
@@ -32,7 +34,6 @@ import {
 	throwWrongValueType,
 } from "../commandclass/API";
 import type { Driver } from "../driver/Driver";
-import { MessagePriority } from "../message/Constants";
 import {
 	API,
 	CCCommand,
@@ -42,52 +43,13 @@ import {
 	CommandClass,
 	commandClass,
 	CommandClassDeserializationOptions,
+	CommandClassOptions,
 	expectedCCResponse,
 	gotDeserializationOptions,
 	implementedVersion,
 } from "./CommandClass";
 import type { NotificationEventPayload } from "./NotificationEventPayload";
-
-// All the supported commands
-export enum UserCodeCommand {
-	Set = 0x01,
-	Get = 0x02,
-	Report = 0x03,
-	// V2+
-	UsersNumberGet = 0x04,
-	UsersNumberReport = 0x05,
-	CapabilitiesGet = 0x06,
-	CapabilitiesReport = 0x07,
-	KeypadModeSet = 0x08,
-	KeypadModeGet = 0x09,
-	KeypadModeReport = 0x0a,
-	ExtendedUserCodeSet = 0x0b,
-	ExtendedUserCodeGet = 0x0c,
-	ExtendedUserCodeReport = 0x0d,
-	MasterCodeSet = 0x0e,
-	MasterCodeGet = 0x0f,
-	MasterCodeReport = 0x10,
-	UserCodeChecksumGet = 0x11,
-	UserCodeChecksumReport = 0x12,
-}
-
-// @publicAPI
-export enum UserIDStatus {
-	Available = 0x00,
-	Enabled,
-	Disabled,
-	Messaging,
-	PassageMode,
-	StatusNotAvailable = 0xfe,
-}
-
-// @publicAPI
-export enum KeypadMode {
-	Normal = 0x00,
-	Vacation,
-	Privacy,
-	LockedOut,
-}
+import { KeypadMode, UserCodeCommand, UserIDStatus } from "./_Types";
 
 export function getSupportedUsersValueID(
 	endpoint: number | undefined,
@@ -439,7 +401,9 @@ export class UserCodeCCAPI extends PhysicalCCAPI {
 		}
 
 		// Verify the current value after a (short) delay
-		this.schedulePoll({ property, propertyKey }, { transition: "fast" });
+		this.schedulePoll({ property, propertyKey }, value, {
+			transition: "fast",
+		});
 	};
 
 	protected [POLL_VALUE]: PollValueImplementation = async ({
@@ -732,14 +696,22 @@ export class UserCodeCCAPI extends PhysicalCCAPI {
 export class UserCodeCC extends CommandClass {
 	declare ccCommand: UserCodeCommand;
 
-	public async interview(): Promise<void> {
-		const node = this.getNode()!;
-		const endpoint = this.getEndpoint()!;
+	public constructor(host: ZWaveHost, options: CommandClassOptions) {
+		super(host, options);
+		// Hide user codes from value logs
+		this.registerValue(getUserCodeValueID(undefined, 0).property, {
+			secret: true,
+		});
+	}
+
+	public async interview(driver: Driver): Promise<void> {
+		const node = this.getNode(driver)!;
+		const endpoint = this.getEndpoint(driver)!;
 		const api = endpoint.commandClasses["User Code"].withOptions({
 			priority: MessagePriority.NodeQuery,
 		});
 
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			endpoint: this.endpointIndex,
 			message: `Interviewing ${this.ccName}...`,
 			direction: "none",
@@ -747,13 +719,13 @@ export class UserCodeCC extends CommandClass {
 
 		// Query capabilities first to determine what needs to be done when refreshing
 		if (this.version >= 2) {
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				message: "querying capabilities...",
 				direction: "outbound",
 			});
 			const caps = await api.getCapabilities();
 			if (!caps) {
-				this.driver.controllerLog.logNode(node.id, {
+				driver.controllerLog.logNode(node.id, {
 					endpoint: this.endpointIndex,
 					message:
 						"User Code capabilities query timed out, skipping interview...",
@@ -763,13 +735,13 @@ export class UserCodeCC extends CommandClass {
 			}
 		}
 
-		this.driver.controllerLog.logNode(node.id, {
+		driver.controllerLog.logNode(node.id, {
 			message: "querying number of user codes...",
 			direction: "outbound",
 		});
 		const supportedUsers = await api.getUsersCount();
 		if (supportedUsers == undefined) {
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				endpoint: this.endpointIndex,
 				message:
 					"Querying number of user codes timed out, skipping interview...",
@@ -783,17 +755,17 @@ export class UserCodeCC extends CommandClass {
 		}
 
 		// Synchronize user codes and settings
-		if (this.driver.options.interview.queryAllUserCodes) {
-			await this.refreshValues();
+		if (driver.options.interview.queryAllUserCodes) {
+			await this.refreshValues(driver);
 		}
 
 		// Remember that the interview is complete
 		this.interviewComplete = true;
 	}
 
-	public async refreshValues(): Promise<void> {
-		const node = this.getNode()!;
-		const endpoint = this.getEndpoint()!;
+	public async refreshValues(driver: Driver): Promise<void> {
+		const node = this.getNode(driver)!;
+		const endpoint = this.getEndpoint(driver)!;
 		const api = endpoint.commandClasses["User Code"].withOptions({
 			priority: MessagePriority.NodeQuery,
 		});
@@ -818,14 +790,14 @@ export class UserCodeCC extends CommandClass {
 		// Check for changed values and codes
 		if (this.version >= 2) {
 			if (supportsMasterCode) {
-				this.driver.controllerLog.logNode(node.id, {
+				driver.controllerLog.logNode(node.id, {
 					message: "querying master code...",
 					direction: "outbound",
 				});
 				await api.getMasterCode();
 			}
 			if (supportedKeypadModes.length > 1) {
-				this.driver.controllerLog.logNode(node.id, {
+				driver.controllerLog.logNode(node.id, {
 					message: "querying active keypad mode...",
 					direction: "outbound",
 				});
@@ -837,7 +809,7 @@ export class UserCodeCC extends CommandClass {
 				) ?? 0;
 			let currentUserCodeChecksum: number | undefined = 0;
 			if (supportsUserCodeChecksum) {
-				this.driver.controllerLog.logNode(node.id, {
+				driver.controllerLog.logNode(node.id, {
 					message: "retrieving current user code checksum...",
 					direction: "outbound",
 				});
@@ -847,7 +819,7 @@ export class UserCodeCC extends CommandClass {
 				!supportsUserCodeChecksum ||
 				currentUserCodeChecksum !== storedUserCodeChecksum
 			) {
-				this.driver.controllerLog.logNode(node.id, {
+				driver.controllerLog.logNode(node.id, {
 					message:
 						"checksum changed or is not supported, querying all user codes...",
 					direction: "outbound",
@@ -858,7 +830,7 @@ export class UserCodeCC extends CommandClass {
 					if (response) {
 						nextUserId = response.nextUserId;
 					} else {
-						this.driver.controllerLog.logNode(node.id, {
+						driver.controllerLog.logNode(node.id, {
 							endpoint: this.endpointIndex,
 							message: `Querying user code #${nextUserId} timed out, skipping the remaining interview...`,
 							level: "warn",
@@ -869,7 +841,7 @@ export class UserCodeCC extends CommandClass {
 			}
 		} else {
 			// V1
-			this.driver.controllerLog.logNode(node.id, {
+			driver.controllerLog.logNode(node.id, {
 				message: "querying all user codes...",
 				direction: "outbound",
 			});
@@ -903,12 +875,12 @@ type UserCodeCCSetOptions =
 @CCCommand(UserCodeCommand.Set)
 export class UserCodeCCSet extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| (CCCommandOptions & UserCodeCCSetOptions),
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -917,7 +889,7 @@ export class UserCodeCCSet extends UserCodeCC {
 			);
 		} else {
 			const numUsers =
-				this.getNode()?.getValue<number>(
+				this.getValueDB()?.getValue<number>(
 					getSupportedUsersValueID(this.endpointIndex),
 				) ?? 0;
 			this.userId = options.userId;
@@ -990,10 +962,10 @@ export class UserCodeCCReport
 	implements NotificationEventPayload
 {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 2);
 		this.userId = this.payload[0];
 		this.userIdStatus = this.payload[1];
@@ -1074,10 +1046,10 @@ interface UserCodeCCGetOptions extends CCCommandOptions {
 @expectedCCResponse(UserCodeCCReport)
 export class UserCodeCCGet extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions | UserCodeCCGetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -1107,10 +1079,10 @@ export class UserCodeCCGet extends UserCodeCC {
 @CCCommand(UserCodeCommand.UsersNumberReport)
 export class UserCodeCCUsersNumberReport extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 1);
 		if (this.payload.length >= 3) {
 			// V2+
@@ -1140,10 +1112,10 @@ export class UserCodeCCUsersNumberGet extends UserCodeCC {}
 @CCCommand(UserCodeCommand.CapabilitiesReport)
 export class UserCodeCCCapabilitiesReport extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		let offset = 0;
 
 		validatePayload(this.payload.length >= offset + 1);
@@ -1251,12 +1223,12 @@ interface UserCodeCCKeypadModeSetOptions extends CCCommandOptions {
 @CCCommand(UserCodeCommand.KeypadModeSet)
 export class UserCodeCCKeypadModeSet extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| UserCodeCCKeypadModeSetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -1273,7 +1245,7 @@ export class UserCodeCCKeypadModeSet extends UserCodeCC {
 			this.keypadMode = options.keypadMode;
 
 			const supportedModes =
-				this.getNode()?.getValue<KeypadMode[]>(
+				this.getValueDB()?.getValue<KeypadMode[]>(
 					getSupportedKeypadModesValueID(this.endpointIndex),
 				) ?? [];
 
@@ -1309,10 +1281,10 @@ export class UserCodeCCKeypadModeSet extends UserCodeCC {
 @CCCommand(UserCodeCommand.KeypadModeReport)
 export class UserCodeCCKeypadModeReport extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 1);
 		this.keypadMode = this.payload[0];
 		this.persistValues();
@@ -1362,12 +1334,12 @@ interface UserCodeCCMasterCodeSetOptions extends CCCommandOptions {
 @CCCommand(UserCodeCommand.MasterCodeSet)
 export class UserCodeCCMasterCodeSet extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| UserCodeCCMasterCodeSetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -1382,7 +1354,7 @@ export class UserCodeCCMasterCodeSet extends UserCodeCC {
 				);
 			}
 			const supportedAsciiChars =
-				this.getNode()?.getValue<string>(
+				this.getValueDB()?.getValue<string>(
 					getSupportedASCIICharsValueID(this.endpointIndex),
 				) ?? "";
 
@@ -1391,7 +1363,7 @@ export class UserCodeCCMasterCodeSet extends UserCodeCC {
 			// Validate the code
 			if (!this.masterCode) {
 				const supportsDeactivation =
-					this.getNode()?.getValue<boolean>(
+					this.getValueDB()?.getValue<boolean>(
 						getSupportsMasterCodeDeactivationValueID(
 							this.endpointIndex,
 						),
@@ -1432,10 +1404,10 @@ export class UserCodeCCMasterCodeSet extends UserCodeCC {
 @CCCommand(UserCodeCommand.MasterCodeReport)
 export class UserCodeCCMasterCodeReport extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 1);
 		const codeLength = this.payload[0] & 0b1111;
 		validatePayload(this.payload.length >= 1 + codeLength);
@@ -1445,7 +1417,10 @@ export class UserCodeCCMasterCodeReport extends UserCodeCC {
 		this.persistValues();
 	}
 
-	@ccValue({ minVersion: 2 })
+	@ccValue({
+		minVersion: 2,
+		secret: true,
+	})
 	@ccValueMetadata({
 		...ValueMetadata.String,
 		label: "Master Code",
@@ -1469,10 +1444,10 @@ export class UserCodeCCMasterCodeGet extends UserCodeCC {}
 @CCCommand(UserCodeCommand.UserCodeChecksumReport)
 export class UserCodeCCUserCodeChecksumReport extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 2);
 		this.userCodeChecksum = this.payload.readUInt16BE(0);
 		this.persistValues();
@@ -1510,12 +1485,12 @@ export type SettableUserCode = UserCode & {
 @CCCommand(UserCodeCommand.ExtendedUserCodeSet)
 export class UserCodeCCExtendedUserCodeSet extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| UserCodeCCExtendedUserCodeSetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(
@@ -1532,19 +1507,19 @@ export class UserCodeCCExtendedUserCodeSet extends UserCodeCC {
 			this.userCodes = options.userCodes as any;
 
 			const numUsers =
-				this.getNode()?.getValue<number>(
+				this.getValueDB()?.getValue<number>(
 					getSupportedUsersValueID(this.endpointIndex),
 				) ?? 0;
 			const supportedStatuses =
-				this.getNode()?.getValue<number[]>(
+				this.getValueDB()?.getValue<number[]>(
 					getSupportedUserIDStatusesValueID(this.endpointIndex),
 				) ?? [];
 			const supportedAsciiChars =
-				this.getNode()?.getValue<string>(
+				this.getValueDB()?.getValue<string>(
 					getSupportedASCIICharsValueID(this.endpointIndex),
 				) ?? "";
 			const supportsMultipleUserCodeSet =
-				this.getNode()?.getValue<boolean>(
+				this.getValueDB()?.getValue<boolean>(
 					getSupportsMultipleUserCodeSetValueID(this.endpointIndex),
 				) ?? false;
 
@@ -1647,10 +1622,10 @@ export class UserCodeCCExtendedUserCodeSet extends UserCodeCC {
 @CCCommand(UserCodeCommand.ExtendedUserCodeReport)
 export class UserCodeCCExtendedUserCodeReport extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options: CommandClassDeserializationOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		validatePayload(this.payload.length >= 1);
 		const numCodes = this.payload[0];
 		let offset = 1;
@@ -1705,12 +1680,12 @@ interface UserCodeCCExtendedUserCodeGetOptions extends CCCommandOptions {
 @expectedCCResponse(UserCodeCCExtendedUserCodeReport)
 export class UserCodeCCExtendedUserCodeGet extends UserCodeCC {
 	public constructor(
-		driver: Driver,
+		host: ZWaveHost,
 		options:
 			| CommandClassDeserializationOptions
 			| UserCodeCCExtendedUserCodeGetOptions,
 	) {
-		super(driver, options);
+		super(host, options);
 		if (gotDeserializationOptions(options)) {
 			// TODO: Deserialize payload
 			throw new ZWaveError(

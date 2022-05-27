@@ -1,13 +1,25 @@
 {
   "name": "@zwave-js/nvmedit",
-  "version": "9.0.0",
+  "version": "9.3.0",
   "description": "zwave-js: library to edit NVM backups",
   "publishConfig": {
     "access": "public"
   },
   "keywords": [],
   "main": "build/index.js",
+  "exports": {
+    ".": "./build/index.js",
+    "./package.json": "./package.json",
+    "./safe": "./build/index_safe.js"
+  },
   "types": "build/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "safe": [
+        "build/index_safe.d.ts"
+      ]
+    }
+  },
   "files": [
     "bin/",
     "build/**/*.{js,d.ts,map}"
@@ -36,10 +48,10 @@
     "@zwave-js/core": "workspace:*",
     "@zwave-js/shared": "workspace:*",
     "alcalzone-shared": "^4.0.1",
-    "fs-extra": "^10.0.1",
+    "fs-extra": "^10.1.0",
     "reflect-metadata": "^0.1.13",
-    "semver": "^7.3.5",
-    "yargs": "^17.4.0"
+    "semver": "^7.3.7",
+    "yargs": "^17.4.1"
   },
   "scripts": {
     "build": "tsc -b tsconfig.build.json --verbose",
@@ -49,12 +61,12 @@
   "devDependencies": {
     "@types/fs-extra": "^9.0.13",
     "@types/jest": "^27.4.1",
-    "@types/node": "^15.12.5",
+    "@types/node": "^14.18.16",
     "@types/semver": "^7.3.9",
     "@types/yargs": "^17.0.10",
-    "esbuild": "0.14.29",
+    "esbuild": "0.14.38",
     "esbuild-register": "^3.3.2",
     "jest-extended": "^2.0.0",
-    "typescript": "4.6.3"
+    "typescript": "4.6.4"
   }
 }

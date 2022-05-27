@@ -169,12 +169,12 @@ Stops the inclusion process for a new node. The returned promise resolves to `tr
 ### `beginExclusion`
 
 ```ts
-async beginExclusion(unprovision?: boolean): Promise<boolean>
+async beginExclusion(unprovision?: boolean | "inactive"): Promise<boolean>
 ```
 
 Starts the exclusion process to remove a node from the network. The returned promise resolves to `true` if starting the exclusion was successful, `false` if it failed or if it was already active.
 
-The optional parameter `unprovision` specifies whether the removed node should be removed from the Smart Start provisioning list as well.
+The optional parameter `unprovision` specifies whether the removed node should be removed from the Smart Start provisioning list as well. A value of `"inactive"` will keep the provisioning entry, but disable it, preventing automatic inclusion of the corresponding nodes.
 
 ### `stopExclusion`
 
@@ -200,9 +200,23 @@ The parameter has the following shape:
 
 ```ts
 interface PlannedProvisioningEntry {
+	/**
+	 * The status of this provisioning entry, which is assumed to be active by default.
+	 * Inactive entries do not get included automatically.
+	 */
+	status?: ProvisioningEntryStatus;
+
 	/** The device specific key (DSK) in the form aaaaa-bbbbb-ccccc-ddddd-eeeee-fffff-11111-22222 */
 	dsk: string;
+
+	/** The security classes that have been **granted** by the user */
 	securityClasses: SecurityClass[];
+	/**
+	 * The security classes that were **requested** by the device.
+	 * When this is not set, applications should default to {@link securityClasses} instead.
+	 */
+	requestedSecurityClasses?: readonly SecurityClass[];
+
 	/**
 	 * Additional properties to be stored in this provisioning entry, e.g. the device ID from a scanned QR code
 	 */
@@ -727,19 +741,19 @@ Returns the type of the Z-Wave library that is supported by the controller hardw
 <!-- #import ZWaveLibraryTypes from "zwave-js" -->
 
 ```ts
-enum ZWaveLibraryTypes {
-	"Unknown",
-	"Static Controller",
-	"Controller",
-	"Enhanced Slave",
-	"Slave",
-	"Installer",
-	"Routing Slave",
-	"Bridge Controller",
-	"Device under Test",
-	"N/A",
-	"AV Remote",
-	"AV Device",
+declare enum ZWaveLibraryTypes {
+	"Unknown" = 0,
+	"Static Controller" = 1,
+	"Controller" = 2,
+	"Enhanced Slave" = 3,
+	"Slave" = 4,
+	"Installer" = 5,
+	"Routing Slave" = 6,
+	"Bridge Controller" = 7,
+	"Device under Test" = 8,
+	"N/A" = 9,
+	"AV Remote" = 10,
+	"AV Device" = 11,
 }
 ```
 

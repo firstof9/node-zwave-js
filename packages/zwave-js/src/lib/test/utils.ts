@@ -31,7 +31,10 @@ export async function createAndStartDriver(
 
 	const driver = new Driver(PORT_ADDRESS, {
 		...options,
-		interview: { skipInterview: true },
+		testingHooks: {
+			skipControllerIdentification: true,
+			skipNodeInterview: true,
+		},
 	});
 	driver.on("error", () => {
 		/* swallow error events during testing */
@@ -62,6 +65,7 @@ export async function createAndStartDriver(
 		isFunctionSupported: () => true,
 		nodes: new Map(),
 		incrementStatistics: () => {},
+		removeAllListeners: () => {},
 	} as any;
 
 	return {
